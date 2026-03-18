@@ -1,7 +1,7 @@
-name: Build OpenWrt Packages (MT7621 Generic)
+name: Build Printing Packages (MT7621 Generic)
 
 on:
-  workflow_dispatch:   # 手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -30,7 +30,6 @@ jobs:
         cd openwrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        # 最小化配置：MT7621 Generic + 打印包
         cat > .config <<'EOF'
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
@@ -56,13 +55,26 @@ jobs:
         make toolchain/compile -j$(nproc) V=s
         make target/compile -j$(nproc) V=s
 
+    - name: Show printing feed packages
+      run: |
+        cd openwrt
+        echo "=== Printing feed packages ==="
+        ls -1 package/feeds/printing || echo "No printing packages found!"
+
     - name: Build printing packages
       run: |
         cd openwrt
-        for pkg in $(./scripts/feeds list -n printing | awk '{print $1}'); do
-          echo ">>> Building $pkg"
-          make package/$pkg/compile -j$(nproc) V=s || true
-        done
+        make package/feeds/printing/cups/compile -j$(nproc) V=s
+        make package/feeds/printing/cups-filters/compile -j$(nproc) V=s
+        make package/feeds/printing/ghostscript/compile -j$(nproc) V=s
+        make package/feeds/printing/hplip/compile -j$(nproc) V=s
+        make package/feeds/printing/lcms2/compile -j$(nproc) V=s
+        make package/feeds/printing/libcairo/compile -j$(nproc) V=s
+        make package/feeds/printing/libcupsfilters/compile -j$(nproc) V=s
+        make package/feeds/printing/libppd/compile -j$(nproc) V=s
+        make package/feeds/printing/poppler/compile -j$(nproc) V=s
+        make package/feeds/printing/python3-dbus/compile -j$(nproc) V=s
+        make package/feeds/printing/qpdf/compile -j$(nproc) V=s
 
     - name: List generated IPK files
       run: |
