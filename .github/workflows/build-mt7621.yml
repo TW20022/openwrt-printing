@@ -1,10 +1,7 @@
 name: Build Printing Packages for MT7621
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:   # 手动触发
 
 jobs:
   build:
@@ -12,18 +9,29 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Install build dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential libncurses5-dev gawk flex git wget unzip python3-distutils
 
+    - name: Cache OpenWrt build
+      uses: actions/cache@v4
+      with:
+        path: |
+          openwrt/dl
+          openwrt/build_dir
+          openwrt/staging_dir
+        key: ${{ runner.os }}-openwrt-${{ github.sha }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-
+
     - name: Clone OpenWrt source
       run: |
         git clone https://github.com/openwrt/openwrt.git
         cd openwrt
-        git checkout v24.10.3
+        git checkout v24.10.5
         cp feeds.conf.default feeds.conf
         sed -i '1i\\src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git' feeds.conf
         sed -i '/--keep-system-cflags\\|--keep-system-libs/d' tools/pkgconf/files/pkg-config
@@ -33,7 +41,6 @@ jobs:
         cd openwrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        # 下载并应用 MT7621 的 config.buildinfo
         wget https://downloads.openwrt.org/releases/24.10.3/targets/ramips/mt7621/config.buildinfo
         cp config.buildinfo .config
         make defconfig
@@ -46,10 +53,10 @@ jobs:
         make package/hplip/compile -j$(nproc) V=s
         make package/cups-filters/compile -j$(nproc) V=s
         make package/libcupsfilters/compile -j$(nproc) V=s
-        # 其他需要的打印相关包都可以在这里列出来
+        # 其他需要的打印相关包也可以在这里列出来
 
     - name: Upload IPK artifacts
-      uses: actions/upload-artifact@v3
+      uses: actions/upload-artifact@v4
       with:
         name: mt7621-printing-ipk
         path: openwrt/bin/packages/mipsel_24kc/printing/*.ipk
