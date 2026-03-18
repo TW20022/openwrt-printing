@@ -1,4 +1,4 @@
-name: Build Printing Packages for MT7621
+name: Build Printing Packages (MT7621, v24.10.5)
 
 on:
   workflow_dispatch:   # 手动触发
@@ -14,18 +14,7 @@ jobs:
     - name: Install build dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libncurses5-dev gawk flex git wget unzip python3-distutils
-
-    - name: Cache OpenWrt build
-      uses: actions/cache@v4
-      with:
-        path: |
-          openwrt/dl
-          openwrt/build_dir
-          openwrt/staging_dir
-        key: ${{ runner.os }}-openwrt-${{ github.sha }}
-        restore-keys: |
-          ${{ runner.os }}-openwrt-
+        sudo apt-get install -y build-essential libncurses5-dev gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel
 
     - name: Clone OpenWrt source
       run: |
@@ -36,27 +25,29 @@ jobs:
         sed -i '1i\\src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git' feeds.conf
         sed -i '/--keep-system-cflags\\|--keep-system-libs/d' tools/pkgconf/files/pkg-config
 
-    - name: Configure MT7621 target
+    - name: Configure feeds and target
       run: |
         cd openwrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        wget https://downloads.openwrt.org/releases/24.10.3/targets/ramips/mt7621/config.buildinfo
+        wget https://downloads.openwrt.org/releases/24.10.5/targets/ramips/mt7621/config.buildinfo
         cp config.buildinfo .config
         make defconfig
+        # 将 printing feed 里的所有包设为 M
+        for pkg in $(./scripts/feeds list -n printing | awk '{print $1}'); do
+          scripts/config --module PACKAGE_$pkg || true
+        done
 
     - name: Build printing packages
       run: |
         cd openwrt
-        make toolchain/compile -j$(nproc) V=s
-        make target/compile -j$(nproc) V=s
-        make package/hplip/compile -j$(nproc) V=s
-        make package/cups-filters/compile -j$(nproc) V=s
-        make package/libcupsfilters/compile -j$(nproc) V=s
-        # 其他需要的打印相关包也可以在这里列出来
+        # 编译 printing feed 下的所有包
+        for pkg in $(./scripts/feeds list -n printing | awk '{print $1}'); do
+          make package/$pkg/compile -j$(nproc) V=s || true
+        done
 
     - name: Upload IPK artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: mt7621-printing-ipk
+        name: printing-ipk
         path: openwrt/bin/packages/mipsel_24kc/printing/*.ipk
