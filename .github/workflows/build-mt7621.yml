@@ -1,0 +1,55 @@
+name: Build Printing Packages for MT7621
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libncurses5-dev gawk flex git wget unzip python3-distutils
+
+    - name: Clone OpenWrt source
+      run: |
+        git clone https://github.com/openwrt/openwrt.git
+        cd openwrt
+        git checkout v24.10.3
+        cp feeds.conf.default feeds.conf
+        sed -i '1i\\src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git' feeds.conf
+        sed -i '/--keep-system-cflags\\|--keep-system-libs/d' tools/pkgconf/files/pkg-config
+
+    - name: Configure MT7621 target
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+        # 下载并应用 MT7621 的 config.buildinfo
+        wget https://downloads.openwrt.org/releases/24.10.3/targets/ramips/mt7621/config.buildinfo
+        cp config.buildinfo .config
+        make defconfig
+
+    - name: Build printing packages
+      run: |
+        cd openwrt
+        make toolchain/compile -j$(nproc) V=s
+        make target/compile -j$(nproc) V=s
+        make package/hplip/compile -j$(nproc) V=s
+        make package/cups-filters/compile -j$(nproc) V=s
+        make package/libcupsfilters/compile -j$(nproc) V=s
+        # 其他需要的打印相关包都可以在这里列出来
+
+    - name: Upload IPK artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: mt7621-printing-ipk
+        path: openwrt/bin/packages/mipsel_24kc/printing/*.ipk
