@@ -1,4 +1,4 @@
-name: Build Printing Packages (MT7621, v24.10.5)
+name: Build OpenWrt Packages (MT7621 Generic)
 
 on:
   workflow_dispatch:   # 手动触发
@@ -8,21 +8,21 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
+    - name: Checkout
       uses: actions/checkout@v4
 
-    - name: Install build dependencies
+    - name: Install dependencies
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential libncurses5-dev gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel
 
-    - name: Clone OpenWrt source
+    - name: Clone OpenWrt
       run: |
         git clone https://github.com/openwrt/openwrt.git
         cd openwrt
         git checkout v24.10.5
         cp feeds.conf.default feeds.conf
-        sed -i '1i\\src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git' feeds.conf
+        echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
         sed -i '/--keep-system-cflags\\|--keep-system-libs/d' tools/pkgconf/files/pkg-config
 
     - name: Configure feeds and target
@@ -30,24 +30,48 @@ jobs:
         cd openwrt
         ./scripts/feeds update -a
         ./scripts/feeds install -a
-        wget https://downloads.openwrt.org/releases/24.10.5/targets/ramips/mt7621/config.buildinfo
-        cp config.buildinfo .config
+        # 最小化配置：MT7621 Generic + 打印包
+        cat > .config <<'EOF'
+        CONFIG_TARGET_ramips=y
+        CONFIG_TARGET_ramips_mt7621=y
+        CONFIG_TARGET_ramips_mt7621_Generic=y
+
+        CONFIG_PACKAGE_cups=m
+        CONFIG_PACKAGE_cups-filters=m
+        CONFIG_PACKAGE_ghostscript=m
+        CONFIG_PACKAGE_hplip=m
+        CONFIG_PACKAGE_lcms2=m
+        CONFIG_PACKAGE_libcairo=m
+        CONFIG_PACKAGE_libcupsfilters=m
+        CONFIG_PACKAGE_libppd=m
+        CONFIG_PACKAGE_poppler=m
+        CONFIG_PACKAGE_python3-dbus=m
+        CONFIG_PACKAGE_qpdf=m
+        EOF
         make defconfig
-        # 将 printing feed 里的所有包设为 M
-        for pkg in $(./scripts/feeds list -n printing | awk '{print $1}'); do
-          scripts/config --module PACKAGE_$pkg || true
-        done
+
+    - name: Build toolchain and target
+      run: |
+        cd openwrt
+        make toolchain/compile -j$(nproc) V=s
+        make target/compile -j$(nproc) V=s
 
     - name: Build printing packages
       run: |
         cd openwrt
-        # 编译 printing feed 下的所有包
         for pkg in $(./scripts/feeds list -n printing | awk '{print $1}'); do
+          echo ">>> Building $pkg"
           make package/$pkg/compile -j$(nproc) V=s || true
         done
 
-    - name: Upload IPK artifacts
+    - name: List generated IPK files
+      run: |
+        cd openwrt
+        echo "=== Generated IPK files ==="
+        find bin/packages -type f -name "*.ipk" || echo "No IPK files found!"
+
+    - name: Upload all IPK artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: printing-ipk
-        path: openwrt/bin/packages/mipsel_24kc/printing/*.ipk
+        name: all-ipk
+        path: openwrt/bin/packages/**/*.ipk
