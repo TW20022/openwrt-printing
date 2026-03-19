@@ -45,7 +45,7 @@ jobs:
     - name: Pre-check package directories
       run: |
         cd openwrt-sdk
-        for dir in feeds/packages/utils/dbus package/feeds/printing/python3-dbus package/feeds/printing/hplip; do
+        for dir in feeds/packages/utils/dbus feeds/printing/python3-dbus feeds/printing/hplip; do
           if [ ! -d "$dir" ]; then
             echo "ERROR: Missing directory $dir"
             exit 1
@@ -59,7 +59,7 @@ jobs:
 
     - name: Patch python3-dbus Makefile
       run: |
-        cd openwrt-sdk/package/feeds/printing/python3-dbus
+        cd openwrt-sdk/feeds/printing/python3-dbus
         echo 'PKG_BUILD_DEPENDS:=python3/host' >> Makefile
         echo 'TARGET_CFLAGS += -DLONG_BIT=32' >> Makefile
 
