@@ -27,7 +27,7 @@ jobs:
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
         echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
-        ./scripts/feeds update printing >/dev/null
+        ./scripts/feeds update packages printing >/dev/null
         ./scripts/feeds install dbus python3-dbus hplip >/dev/null
 
         cat > .config <<'EOF'
@@ -44,7 +44,7 @@ jobs:
 
     - name: Patch dbus Makefile
       run: |
-        cd openwrt-sdk/package/libs/dbus
+        cd openwrt-sdk/feeds/packages/utils/dbus
         echo 'PKG_INSTALL:=1' >> Makefile
 
     - name: Patch python3-dbus Makefile
@@ -56,8 +56,7 @@ jobs:
     - name: Build dbus
       run: |
         cd openwrt-sdk
-        make package/dbus/compile V=s -j$(nproc) | tee build-dbus.log
-        # 检查 dbus-1.pc 是否存在，否则直接中断 CI
+        make package/feeds/packages/dbus/compile V=s -j$(nproc) | tee build-dbus.log
         if ! ls staging_dir/target-*/pkgconfig/dbus-1.pc >/dev/null 2>&1; then
           echo "ERROR: dbus-1.pc missing, aborting CI"
           exit 1
@@ -67,7 +66,6 @@ jobs:
       run: |
         cd openwrt-sdk
         make package/feeds/printing/python3-dbus/compile V=s -j$(nproc) | tee build-python3-dbus.log
-        # 测试 Python 是否能导入 dbus，否则直接中断 CI
         if ! staging_dir/hostpkg/bin/python3 -c "import dbus" >/dev/null 2>&1; then
           echo "ERROR: python3-dbus import failed, aborting CI"
           exit 1
