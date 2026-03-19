@@ -23,7 +23,7 @@ jobs:
         tar -xf openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
         mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
 
-    - name: Configure feeds and target
+    - name: Configure feeds
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
@@ -31,77 +31,72 @@ jobs:
         ./scripts/feeds update -a
         ./scripts/feeds install -a
 
-        cat > .config <<'EOF'
-        CONFIG_TARGET_ramips=y
-        CONFIG_TARGET_ramips_mt7621=y
-        CONFIG_TARGET_ramips_mt7621_Generic=y
-        CONFIG_PACKAGE_dbus=y
-        CONFIG_PACKAGE_python3-light=y
-        CONFIG_PACKAGE_python3-dbus=y
-        CONFIG_PACKAGE_hplip=y
-        EOF
+    # 使用 GitHub Actions 缓存来加速后续编译中的源码下载
+    - name: Cache dl directory
+      uses: actions/cache@v4
+      with:
+        path: openwrt-sdk/dl
+        key: ${{ runner.os }}-openwrt-dl-${{ hashFiles('**/Makefile') }}
+        restore-keys: |
+          ${{ runner.os }}-openwrt-dl-
 
-        make defconfig
-
-    - name: Patch dbus Makefile (Critical Fix)
+    - name: Patch Makefiles (Inline Fixes)
       run: |
+        # 1. 修复 dbus：确保它安装开发头文件到 staging_dir
         cd openwrt-sdk/feeds/packages/utils/dbus
-        sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_INSTALL:=1' Makefile
-        sed -i '/\$(eval/i \
+        if ! grep -q "Build/InstallDev" Makefile; then
+          sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_INSTALL:=1' Makefile
+          sed -i '/\$(eval \$(call BuildPackage,dbus))/i \
         define Build/InstallDev \
         	$(INSTALL_DIR) $(1)/usr/include/dbus-1.0 \
-        	$(INSTALL_DIR) $(1)/usr/lib/dbus-1.0/include \
-        	$(INSTALL_DIR) $(1)/usr/lib/pkgconfig \
         	$(CP) $(PKG_INSTALL_DIR)/usr/include/dbus-1.0/* $(1)/usr/include/dbus-1.0/ \
-        	$(CP) $(PKG_INSTALL_DIR)/usr/lib/dbus-1.0/include/* $(1)/usr/lib/dbus-1.0/include/ \
+        	$(INSTALL_DIR) $(1)/usr/lib/pkgconfig \
         	$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/dbus-1.pc $(1)/usr/lib/pkgconfig/ \
         endef \
         ' Makefile
+        fi
 
-    - name: Patch python3-dbus Makefile
-      run: |
-        cd openwrt-sdk/feeds/printing/python3-dbus
-        sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_BUILD_DEPENDS:=dbus' Makefile
-        sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_BUILD_DEPENDS+=python3/host' Makefile
+        # 2. 修复 python3-dbus：强制指定依赖和 32 位标识
+        cd ../../../printing/python3-dbus
+        sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_BUILD_DEPENDS:=dbus python3/host' Makefile
+        # 针对 MIPS32 架构的修复
         sed -i '/include $(INCLUDE_DIR)\/package.mk/a TARGET_CFLAGS += -DLONG_BIT=32' Makefile
 
-    - name: Build dbus
+    - name: Final Config and Download
       run: |
         cd openwrt-sdk
+        # 明确启用需要的包
+        echo "CONFIG_PACKAGE_dbus=y" >> .config
+        echo "CONFIG_PACKAGE_python3-light=y" >> .config
+        echo "CONFIG_PACKAGE_python3-dbus=y" >> .config
+        echo "CONFIG_PACKAGE_hplip=y" >> .config
+        
+        make defconfig
+        # 预下载所有源码包，避免编译中途网络错误
+        make download -j8
+
+    - name: Build Packages
+      run: |
+        cd openwrt-sdk
+        # 严格按照顺序编译，确保 staging_dir 依赖链完整
+        echo "Building dbus..."
         make package/dbus/compile V=s -j$(nproc)
-        echo "=== Verifying dbus-1.pc ==="
-        find staging_dir -name "dbus-1.pc" || (echo "ERROR: dbus-1.pc missing" && exit 1)
-
-    - name: Debug dbus-1.pc content
-      run: |
-        cd openwrt-sdk
-        echo "=== dbus-1.pc content ==="
-        for f in $(find staging_dir -name "dbus-1.pc"); do
-          echo "--- $f ---"
-          cat $f
-        done
-
-    - name: Build python3-dbus
-      run: |
-        cd openwrt-sdk
-        export PKG_CONFIG_PATH=$(find $(pwd)/staging_dir -name pkgconfig -type d | head -n 1)
+        
+        echo "Building python3-dbus..."
         make package/python3-dbus/compile V=s -j$(nproc)
-
-    - name: Build hplip
-      run: |
-        cd openwrt-sdk
+        
+        echo "Building hplip..."
         make package/hplip/compile V=s -j$(nproc)
 
-    - name: Check and Collect IPKs
+    - name: Collect IPKs
       run: |
-        cd openwrt-sdk
-        echo "=== Generated IPK files ==="
-        find bin/packages -type f -name "*.ipk"
-        mkdir -p ../output
-        find bin/packages -type f -name "*.ipk" -exec cp {} ../output/ \;
+        mkdir -p output
+        find openwrt-sdk/bin/packages -type f -name "*.ipk" -exec cp {} output/ \;
+        echo "=== Found IPKs ==="
+        ls -lh output/
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: mt7621-printing-packages
+        name: mt7621-hplip-packages
         path: output/*.ipk
