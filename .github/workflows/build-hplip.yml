@@ -19,76 +19,87 @@ jobs:
 
     - name: Download and extract SDK
       run: |
+        set -e
         wget -q https://downloads.openwrt.org/releases/24.10.5/targets/ramips/mt7621/openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
         tar -xf openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
         mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
 
     - name: Configure feeds
       run: |
+        set -e
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
         echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
-        ./scripts/feeds update packages printing
-        ./scripts/feeds install dbus python3-dbus hplip
+        ./scripts/feeds update -a
+        ./scripts/feeds install dbus python3-dbus hplip libusb-1.0 libjpeg-turbo
 
-    - name: Cache dl directory
-      uses: actions/cache@v4
-      with:
-        path: openwrt-sdk/dl
-        key: ${{ runner.os }}-openwrt-dl-${{ hashFiles('**/Makefile') }}
-        restore-keys: |
-          ${{ runner.os }}-openwrt-dl-
-
-    - name: Patch Makefiles (Inline Fixes)
+    - name: Patch Makefiles & Verify
       run: |
-        # 修复 dbus
-        cd openwrt-sdk/feeds/packages/utils/dbus
-        sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_INSTALL:=1' Makefile
-        sed -i '/\$(eval \$(call BuildPackage,dbus))/i \
+        set -e
+        SDK_PATH=$GITHUB_WORKSPACE/openwrt-sdk
+        
+        # 1. 修复 dbus 并校验文件是否存在
+        DBUS_MK=$SDK_PATH/feeds/packages/utils/dbus/Makefile
+        [ -f "$DBUS_MK" ] || { echo "Error: dbus Makefile not found"; exit 1; }
+        
+        sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_INSTALL:=1' $DBUS_MK
+        sed -i '/$(eval $(call BuildPackage,dbus))/i \
         define Build/InstallDev \
         	$(INSTALL_DIR) $(1)/usr/include/dbus-1.0 \
         	$(CP) $(PKG_INSTALL_DIR)/usr/include/dbus-1.0/* $(1)/usr/include/dbus-1.0/ \
         	$(INSTALL_DIR) $(1)/usr/lib/pkgconfig \
         	$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/dbus-1.pc $(1)/usr/lib/pkgconfig/ \
         endef \
-        ' Makefile
+        ' $DBUS_MK
 
-        # 修复 python3-dbus
-        cd ../../../printing/python3-dbus
-        sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_BUILD_DEPENDS:=dbus python3/host' Makefile
-        sed -i '/include $(INCLUDE_DIR)\/package.mk/a TARGET_CFLAGS += -DLONG_BIT=32' Makefile
+        # 2. 修复 python3-dbus
+        PYDBUS_MK=$SDK_PATH/feeds/printing/python3-dbus/Makefile
+        [ -f "$PYDBUS_MK" ] || { echo "Error: python3-dbus Makefile not found"; exit 1; }
+        sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_BUILD_DEPENDS:=dbus python3/host' $PYDBUS_MK
+        sed -i '/include $(INCLUDE_DIR)\/package.mk/a TARGET_CFLAGS += -DLONG_BIT=32' $PYDBUS_MK
 
-    - name: Final Config
-      run: |
-        cd openwrt-sdk
-        echo "CONFIG_PACKAGE_dbus=y" >> .config
-        echo "CONFIG_PACKAGE_python3-light=y" >> .config
-        echo "CONFIG_PACKAGE_python3-dbus=y" >> .config
-        echo "CONFIG_PACKAGE_hplip=y" >> .config
-        make defconfig
-
-    - name: Build Packages
+    - name: Build and Fast-Fail
       run: |
         set -e
         cd openwrt-sdk
-        echo "Building dbus..."
-        make package/dbus/download V=s -j1
-        make package/dbus/compile V=s -j$(nproc)
+        
+        # 写入最小化配置
+        printf "CONFIG_PACKAGE_dbus=y\nCONFIG_PACKAGE_python3-dbus=y\nCONFIG_PACKAGE_hplip=y\n" >> .config
+        make defconfig
+        
+        # 核心环节：每个步骤失败都会立即停止 Workflow
+        echo ">>> [1/3] Building dbus..."
+        make package/dbus/download V=s
+        make package/dbus/compile V=s -j$(nproc) || { echo "DBUS Build Failed"; exit 1; }
 
-        echo "Building python3-dbus..."
-        make package/python3-dbus/download V=s -j1
-        make package/python3-dbus/compile V=s -j$(nproc)
+        # 检查 dbus 编译产物是否存在（这是 python3-dbus 成功的关键）
+        STAGING_DIR=$(find $GITHUB_WORKSPACE/openwrt-sdk/staging_dir -name "dbus-1.pc" | head -n 1)
+        if [ -z "$STAGING_DIR" ]; then
+           echo "Error: dbus-1.pc not found in staging_dir. Dependencies will fail."
+           exit 1
+        fi
 
-        echo "Building hplip..."
-        make package/hplip/download V=s -j1
-        make package/hplip/compile V=s -j$(nproc)
+        echo ">>> [2/3] Building python3-dbus..."
+        make package/python3-dbus/download V=s
+        make package/python3-dbus/compile V=s -j$(nproc) || { echo "Python3-DBUS Build Failed"; exit 1; }
 
-    - name: Collect IPKs
+        echo ">>> [3/3] Building hplip..."
+        make package/hplip/download V=s
+        make package/hplip/compile V=s -j$(nproc) || { echo "HPLIP Build Failed"; exit 1; }
+
+    - name: Collect and Check IPKs
       run: |
+        set -e
         mkdir -p output
         find openwrt-sdk/bin/packages -type f -name "*.ipk" -exec cp {} output/ \;
-        echo "=== Found IPKs ==="
-        ls -lh output/
+        
+        # 检查关键产物是否存在，不存在则标记 Job 失败
+        if [ ! -f output/hplip*.ipk ]; then
+          echo "ERROR: HPLIP IPK was not generated!"
+          ls -R output/
+          exit 1
+        fi
+        echo "Success! Packages collected."
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
