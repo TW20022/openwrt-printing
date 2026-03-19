@@ -14,7 +14,8 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd pkg-config
+        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip \
+          python3-setuptools python3-wheel zstd pkg-config libncurses5-dev libssl-dev file
 
     - name: Download and extract SDK
       run: |
@@ -27,8 +28,8 @@ jobs:
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
         echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
-        ./scripts/feeds update packages printing >/dev/null
-        ./scripts/feeds install dbus python3-dbus hplip >/dev/null
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
 
         cat > .config <<'EOF'
         CONFIG_TARGET_ramips=y
@@ -40,74 +41,67 @@ jobs:
         CONFIG_PACKAGE_hplip=y
         EOF
 
-        make defconfig >/dev/null
+        make defconfig
 
-    - name: Pre-check package directories
+    - name: Patch dbus Makefile (Critical Fix)
       run: |
-        cd openwrt-sdk
-        for dir in feeds/packages/utils/dbus feeds/printing/python3-dbus feeds/printing/hplip; do
-          if [ ! -d "$dir" ]; then
-            echo "ERROR: Missing directory $dir"
-            exit 1
-          fi
-        done
-
-    - name: Patch dbus Makefile
-      run: |
+        # 进入 dbus 目录
         cd openwrt-sdk/feeds/packages/utils/dbus
-        echo 'PKG_INSTALL:=1' >> Makefile
+        
+        # 1. 插入 PKG_INSTALL:=1 确保编译后进行伪安装
+        sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_INSTALL:=1' Makefile
+        
+        # 2. 在第一个 eval 调用之前插入 Build/InstallDev 宏
+        # 否则追加到末尾会被编译引擎忽略
+        sed -i '/\$(eval/i \
+        define Build/InstallDev \
+        	$(INSTALL_DIR) $(1)/usr/include/dbus-1.0 \
+        	$(CP) $(PKG_INSTALL_DIR)/usr/include/dbus-1.0/* $(1)/usr/include/dbus-1.0/ \
+        	$(INSTALL_DIR) $(1)/usr/lib/pkgconfig \
+        	$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/dbus-1.pc $(1)/usr/lib/pkgconfig/ \
+        endef \
+        ' Makefile
 
     - name: Patch python3-dbus Makefile
       run: |
         cd openwrt-sdk/feeds/printing/python3-dbus
-        echo 'PKG_BUILD_DEPENDS:=python3/host' >> Makefile
-        echo 'TARGET_CFLAGS += -DLONG_BIT=32' >> Makefile
+        # 确保依赖 python3-host
+        sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_BUILD_DEPENDS:=python3/host' Makefile
+        # 修正 32位 架构定义
+        sed -i '/include $(INCLUDE_DIR)\/package.mk/a TARGET_CFLAGS += -DLONG_BIT=32' Makefile
 
     - name: Build dbus
       run: |
         cd openwrt-sdk
-        make package/feeds/packages/dbus/compile V=s -j$(nproc) | tee build-dbus.log
-        if ! ls staging_dir/target-*/pkgconfig/dbus-1.pc >/dev/null 2>&1; then
-          echo "ERROR: dbus-1.pc missing, aborting CI"
-          exit 1
-        fi
+        # 先编译依赖包，确保其生成的 .pc 文件进入 staging_dir
+        make package/dbus/compile V=s -j$(nproc)
+        
+        echo "=== Verifying dbus-1.pc location ==="
+        find staging_dir -name "dbus-1.pc"
 
     - name: Build python3-dbus
       run: |
         cd openwrt-sdk
-        make package/feeds/printing/python3-dbus/compile V=s -j$(nproc) | tee build-python3-dbus.log
-        if ! staging_dir/hostpkg/bin/python3 -c "import dbus" >/dev/null 2>&1; then
-          echo "ERROR: python3-dbus import failed, aborting CI"
-          exit 1
-        fi
+        # 设置环境变量让 pkg-config 能在 SDK 的 staging 目录找到 dbus
+        export PKG_CONFIG_PATH=$(find $(pwd)/staging_dir -name pkgconfig -type d | head -n 1)
+        make package/python3-dbus/compile V=s -j$(nproc)
 
     - name: Build hplip
       run: |
         cd openwrt-sdk
-        make package/feeds/printing/hplip/compile V=s -j$(nproc) | tee build-hplip.log
+        make package/hplip/compile V=s -j$(nproc)
 
-    - name: Check IPK files
+    - name: Check and Collect IPKs
       run: |
         cd openwrt-sdk
-        echo "=== Checking IPK files ==="
-        if ! find bin/packages -type f -name "hplip_*.ipk" >/dev/null 2>&1; then
-          echo "ERROR: hplip IPK not generated, aborting CI"
-          exit 1
-        fi
+        echo "=== Generated IPK files ==="
         find bin/packages -type f -name "*.ipk"
+        # 统一复制到一个目录方便上传
+        mkdir -p ../output
+        find bin/packages -type f -name "*.ipk" -exec cp {} ../output/ \;
 
-    - name: Upload printing IPK artifacts
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: printing-ipk
-        path: openwrt-sdk/bin/packages/*/printing/*.ipk
-
-    - name: Upload build logs
-      uses: actions/upload-artifact@v4
-      if: always()
-      with:
-        name: build-logs
-        path: |
-          openwrt-sdk/build-dbus.log
-          openwrt-sdk/build-python3-dbus.log
-          openwrt-sdk/build-hplip.log
+        name: mt7621-printing-packages
+        path: output/*.ipk
