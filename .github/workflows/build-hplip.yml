@@ -42,6 +42,16 @@ jobs:
 
         make defconfig >/dev/null
 
+    - name: Pre-check package directories
+      run: |
+        cd openwrt-sdk
+        for dir in feeds/packages/utils/dbus package/feeds/printing/python3-dbus package/feeds/printing/hplip; do
+          if [ ! -d "$dir" ]; then
+            echo "ERROR: Missing directory $dir"
+            exit 1
+          fi
+        done
+
     - name: Patch dbus Makefile
       run: |
         cd openwrt-sdk/feeds/packages/utils/dbus
@@ -76,9 +86,14 @@ jobs:
         cd openwrt-sdk
         make package/feeds/printing/hplip/compile V=s -j$(nproc) | tee build-hplip.log
 
-    - name: List generated IPK files
+    - name: Check IPK files
       run: |
         cd openwrt-sdk
+        echo "=== Checking IPK files ==="
+        if ! find bin/packages -type f -name "hplip_*.ipk" >/dev/null 2>&1; then
+          echo "ERROR: hplip IPK not generated, aborting CI"
+          exit 1
+        fi
         find bin/packages -type f -name "*.ipk"
 
     - name: Upload printing IPK artifacts
