@@ -1,0 +1,93 @@
+name: Build HPLIP Package (MT7621 SDK)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd pkg-config
+
+    - name: Download and extract SDK
+      run: |
+        wget -q https://downloads.openwrt.org/releases/24.10.5/targets/ramips/mt7621/openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+        tar -xf openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+        mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
+
+    - name: Configure feeds and target
+      run: |
+        cd openwrt-sdk
+        cp feeds.conf.default feeds.conf
+        # 只保留第三方 printing feed
+        echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
+        ./scripts/feeds update printing >/dev/null
+        ./scripts/feeds install dbus python3-dbus hplip >/dev/null
+
+        # 精简 .config，显式启用依赖链
+        cat > .config <<'EOF'
+        CONFIG_TARGET_ramips=y
+        CONFIG_TARGET_ramips_mt7621=y
+        CONFIG_TARGET_ramips_mt7621_Generic=y
+        CONFIG_PACKAGE_dbus=y
+        CONFIG_PACKAGE_python3-light=y
+        CONFIG_PACKAGE_python3-dbus=y
+        CONFIG_PACKAGE_hplip=y
+        EOF
+
+        make defconfig >/dev/null
+
+    - name: Patch python3-dbus Makefile for LONG_BIT
+      run: |
+        cd openwrt-sdk/package/feeds/printing/python3-dbus
+        echo 'TARGET_CFLAGS += -DLONG_BIT=32' >> Makefile
+
+    - name: Build dbus
+      run: |
+        cd openwrt-sdk
+        echo "=== Build dbus ==="
+        make package/dbus/compile V=s -j$(nproc) | tee build-dbus.log
+        echo "=== dbus finished ==="
+
+    - name: Build python3-dbus
+      run: |
+        cd openwrt-sdk
+        echo "=== Build python3-dbus ==="
+        make package/feeds/printing/python3-dbus/compile V=s -j$(nproc) | tee build-python3-dbus.log
+        echo "=== python3-dbus finished ==="
+
+    - name: Build hplip
+      run: |
+        cd openwrt-sdk
+        echo "=== Build hplip ==="
+        make package/feeds/printing/hplip/compile V=s -j$(nproc) | tee build-hplip.log
+        echo "=== hplip finished ==="
+
+    - name: List generated IPK files
+      run: |
+        cd openwrt-sdk
+        echo "=== Printing IPK files ==="
+        find bin/packages -type f -name "*.ipk"
+
+    - name: Upload printing IPK artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: printing-ipk
+        path: openwrt-sdk/bin/packages/*/printing/*.ipk
+
+    - name: Upload build logs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: build-logs
+        path: |
+          openwrt-sdk/build-dbus.log
+          openwrt-sdk/build-python3-dbus.log
+          openwrt-sdk/build-hplip.log
