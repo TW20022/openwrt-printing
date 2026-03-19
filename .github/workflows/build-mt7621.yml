@@ -1,4 +1,4 @@
-name: Build Printing Packages (MT7621 Generic)
+name: Build Printing Packages (MT7621 SDK)
 
 on:
   workflow_dispatch:
@@ -14,76 +14,55 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential libncurses5-dev gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel
+        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel
 
-    - name: Clone OpenWrt
+    - name: Download and extract SDK
       run: |
-        git clone https://github.com/openwrt/openwrt.git
-        cd openwrt
-        git checkout v24.10.5
-        cp feeds.conf.default feeds.conf
-        echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
-        sed -i '/--keep-system-cflags\\|--keep-system-libs/d' tools/pkgconf/files/pkg-config
+        wget -q https://downloads.openwrt.org/releases/24.10.5/targets/ramips/mt7621/openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.xz
+        tar -xf openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.xz
+        mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
 
     - name: Configure feeds and target
       run: |
-        cd openwrt
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+        cd openwrt-sdk
+        cp feeds.conf.default feeds.conf
+        echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
+        ./scripts/feeds update -a >/dev/null
+        ./scripts/feeds install -a >/dev/null
+
+        # 精简 .config
         cat > .config <<'EOF'
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
         CONFIG_TARGET_ramips_mt7621_Generic=y
-
-        CONFIG_PACKAGE_cups=m
-        CONFIG_PACKAGE_cups-filters=m
-        CONFIG_PACKAGE_ghostscript=m
-        CONFIG_PACKAGE_hplip=m
-        CONFIG_PACKAGE_lcms2=m
-        CONFIG_PACKAGE_libcairo=m
-        CONFIG_PACKAGE_libcupsfilters=m
-        CONFIG_PACKAGE_libppd=m
-        CONFIG_PACKAGE_poppler=m
-        CONFIG_PACKAGE_python3-dbus=m
-        CONFIG_PACKAGE_qpdf=m
         EOF
-        make defconfig
 
-    - name: Build toolchain and target
-      run: |
-        cd openwrt
-        make toolchain/compile -j$(nproc) V=s
-        make target/compile -j$(nproc) V=s
+        make defconfig >/dev/null
 
     - name: Show printing feed packages
       run: |
-        cd openwrt
+        cd openwrt-sdk
         echo "=== Printing feed packages ==="
-        ls -1 package/feeds/printing || echo "No printing packages found!"
+        ls -1 package/feeds/printing
 
-    - name: Build printing packages
+    - name: Build printing packages (auto scan)
       run: |
-        cd openwrt
-        make package/feeds/printing/cups/compile -j$(nproc) V=s
-        make package/feeds/printing/cups-filters/compile -j$(nproc) V=s
-        make package/feeds/printing/ghostscript/compile -j$(nproc) V=s
-        make package/feeds/printing/hplip/compile -j$(nproc) V=s
-        make package/feeds/printing/lcms2/compile -j$(nproc) V=s
-        make package/feeds/printing/libcairo/compile -j$(nproc) V=s
-        make package/feeds/printing/libcupsfilters/compile -j$(nproc) V=s
-        make package/feeds/printing/libppd/compile -j$(nproc) V=s
-        make package/feeds/printing/poppler/compile -j$(nproc) V=s
-        make package/feeds/printing/python3-dbus/compile -j$(nproc) V=s
-        make package/feeds/printing/qpdf/compile -j$(nproc) V=s
+        cd openwrt-sdk
+        echo "=== Start building printing packages ==="
+        for pkg in $(ls -1 package/feeds/printing); do
+          echo ">>> Building $pkg ..."
+          make package/feeds/printing/$pkg/compile -j$(nproc) >/dev/null 2>&1 || echo "!!! $pkg failed"
+        done
+        echo "=== Build finished ==="
 
     - name: List generated IPK files
       run: |
-        cd openwrt
-        echo "=== Generated IPK files ==="
-        find bin/packages -type f -name "*.ipk" || echo "No IPK files found!"
+        cd openwrt-sdk
+        echo "=== Printing IPK files ==="
+        find bin/packages -type f -name "*.ipk"
 
     - name: Upload all IPK artifacts
       uses: actions/upload-artifact@v4
       with:
         name: all-ipk
-        path: openwrt/bin/packages/**/*.ipk
+        path: openwrt-sdk/bin/packages/**/*.ipk
