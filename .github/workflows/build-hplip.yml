@@ -28,10 +28,9 @@ jobs:
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
         echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a
+        ./scripts/feeds update packages printing
+        ./scripts/feeds install dbus python3-dbus hplip
 
-    # 使用 GitHub Actions 缓存来加速后续编译中的源码下载
     - name: Cache dl directory
       uses: actions/cache@v4
       with:
@@ -42,11 +41,10 @@ jobs:
 
     - name: Patch Makefiles (Inline Fixes)
       run: |
-        # 1. 修复 dbus：确保它安装开发头文件到 staging_dir
+        # 修复 dbus
         cd openwrt-sdk/feeds/packages/utils/dbus
-        if ! grep -q "Build/InstallDev" Makefile; then
-          sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_INSTALL:=1' Makefile
-          sed -i '/\$(eval \$(call BuildPackage,dbus))/i \
+        sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_INSTALL:=1' Makefile
+        sed -i '/\$(eval \$(call BuildPackage,dbus))/i \
         define Build/InstallDev \
         	$(INSTALL_DIR) $(1)/usr/include/dbus-1.0 \
         	$(CP) $(PKG_INSTALL_DIR)/usr/include/dbus-1.0/* $(1)/usr/include/dbus-1.0/ \
@@ -54,38 +52,35 @@ jobs:
         	$(INSTALL_DATA) $(PKG_INSTALL_DIR)/usr/lib/pkgconfig/dbus-1.pc $(1)/usr/lib/pkgconfig/ \
         endef \
         ' Makefile
-        fi
 
-        # 2. 修复 python3-dbus：强制指定依赖和 32 位标识
+        # 修复 python3-dbus
         cd ../../../printing/python3-dbus
         sed -i '/include $(INCLUDE_DIR)\/package.mk/a PKG_BUILD_DEPENDS:=dbus python3/host' Makefile
-        # 针对 MIPS32 架构的修复
         sed -i '/include $(INCLUDE_DIR)\/package.mk/a TARGET_CFLAGS += -DLONG_BIT=32' Makefile
 
-    - name: Final Config and Download
+    - name: Final Config
       run: |
         cd openwrt-sdk
-        # 明确启用需要的包
         echo "CONFIG_PACKAGE_dbus=y" >> .config
         echo "CONFIG_PACKAGE_python3-light=y" >> .config
         echo "CONFIG_PACKAGE_python3-dbus=y" >> .config
         echo "CONFIG_PACKAGE_hplip=y" >> .config
-        
         make defconfig
-        # 预下载所有源码包，避免编译中途网络错误
-        make download -j8
 
     - name: Build Packages
       run: |
+        set -e
         cd openwrt-sdk
-        # 严格按照顺序编译，确保 staging_dir 依赖链完整
         echo "Building dbus..."
+        make package/dbus/download V=s -j1
         make package/dbus/compile V=s -j$(nproc)
-        
+
         echo "Building python3-dbus..."
+        make package/python3-dbus/download V=s -j1
         make package/python3-dbus/compile V=s -j$(nproc)
-        
+
         echo "Building hplip..."
+        make package/hplip/download V=s -j1
         make package/hplip/compile V=s -j$(nproc)
 
     - name: Collect IPKs
