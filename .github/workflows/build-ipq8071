@@ -14,56 +14,66 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd
+        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip \
+        python3-setuptools python3-wheel zstd libncurses-dev libssl-dev file rsync
 
     - name: Download and extract SDK
       run: |
+        # 下载对应的 ipq807x SDK (gcc-14.3.0 musl)
         wget -q https://downloads.openwrt.org/snapshots/targets/qualcommax/ipq807x/openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64.tar.zst
         tar -xf openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64.tar.zst
         mv openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64 openwrt-sdk
 
-    - name: Configure feeds and target
+    - name: Configure feeds and packages
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
+        # 插入第三方打印仓库源
         echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
-        ./scripts/feeds update -a >/dev/null
-        ./scripts/feeds install -a >/dev/null
+        
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
 
-        # 精简 .config
+        # 核心配置：将需要的包设为模块 (m)
+        # 注意：SDK 下只需关注包本身，系统会自动处理依赖关系
         cat > .config <<'EOF'
         CONFIG_TARGET_qualcommax=y
         CONFIG_TARGET_qualcommax_ipq807x=y
         CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_aliyun_ap8220=y
         
+        # 选中核心打印组件
+        CONFIG_PACKAGE_cups=m
+        CONFIG_PACKAGE_cups-filters=m
+        CONFIG_PACKAGE_ghostscript=m
+        CONFIG_PACKAGE_luci-app-usb-printer=m
+        
+        # 如果需要特定的库，也可以在这里显式选中
+        CONFIG_PACKAGE_qpdf=m
+        CONFIG_PACKAGE_libcupsfilters=m
         EOF
 
-        make defconfig >/dev/null
+        # 自动补全所有依赖项
+        make defconfig
 
-    - name: Show printing feed packages
+    - name: Build printing packages
       run: |
         cd openwrt-sdk
-        echo "=== Printing feed packages ==="
-        ls -1 package/feeds/printing
-
-    - name: Build printing packages (auto scan)
-      run: |
-        cd openwrt-sdk
-        echo "=== Start building printing packages ==="
-        for pkg in $(ls -1 package/feeds/printing); do
-          echo ">>> Building $pkg ..."
-          make package/feeds/printing/$pkg/compile -j$(nproc) >/dev/null 2>&1 || echo "!!! $pkg failed"
-        done
+        echo "=== Start building printing packages with dependency handling ==="
+        # 首先尝试多线程编译
+        make package/feeds/printing/compile -j$(nproc) V=s || \
+        # 如果失败（可能是内存不足），则回退到单线程编译并输出详细日志
+        make package/feeds/printing/compile -j1 V=s
         echo "=== Build finished ==="
 
     - name: List generated IPK files
       run: |
         cd openwrt-sdk
-        echo "=== Printing IPK files ==="
+        echo "=== Printing IPK files generated ==="
+        # 查找所有生成的 ipk 文件并列出
         find bin/packages -type f -name "*.ipk"
 
     - name: Upload all IPK artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: all-ipk
+        name: ipq807x-printing-ipks
         path: openwrt-sdk/bin/packages/**/*.ipk
