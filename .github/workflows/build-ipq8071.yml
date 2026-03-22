@@ -1,4 +1,4 @@
-name: Build Printing Packages (Final - High Stability)
+name: Build Printing Packages (Final Stable - DD Swap)
 
 on:
   workflow_dispatch:
@@ -17,14 +17,16 @@ jobs:
           sudo apt-get install -y build-essential gawk flex bison git wget unzip python3 python3-pip \
           python3-setuptools python3-wheel zstd libncurses-dev libssl-dev file rsync patch
 
-      - name: Expand Swap Space (Memory Protection)
-        # 增加 4GB 虚拟内存，防止 Ghostscript 链接时 OOM
+      - name: Expand Swap Space (Fix Text file busy)
+        # 使用 dd 替代 fallocate，并先尝试 swapoff 确保路径可用
         run: |
-          sudo fallocate -l 4G /swapfile
-          sudo chmod 600 /swapfile
-          sudo mkswap /swapfile
-          sudo swapon /swapfile
+          sudo swapoff -a || true
+          sudo dd if=/dev/zero of=/swapfile2 bs=1M count=4096
+          sudo chmod 600 /swapfile2
+          sudo mkswap /swapfile2
+          sudo swapon /swapfile2
           free -h
+        continue-on-error: true # 即使 Swap 失败也继续，不让环境问题卡死编译
 
       - name: Download and extract SDK
         run: |
@@ -52,26 +54,24 @@ jobs:
           CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_aliyun_ap8220=y
           CONFIG_PACKAGE_cups=y
           CONFIG_PACKAGE_ghostscript=y
+          CONFIG_PACKAGE_python3-dbus=n
+          CONFIG_PACKAGE_hplip=n
           EOF
-          echo "CONFIG_PACKAGE_python3-dbus=n" >> .config
-          echo "CONFIG_PACKAGE_hplip=n" >> .config
           make defconfig
 
-      - name: Build Printing Packages (With Failover Logic)
+      - name: Build Printing Packages
         run: |
           cd openwrt-sdk
           
-          echo "=== Phase 1: Building CUPS ==="
-          make package/feeds/printing/cups/install -j$(nproc) || \
-          make package/feeds/printing/cups/install -j1 V=s || exit 1
+          echo "=== Phase 1: CUPS ==="
+          make package/feeds/printing/cups/install -j$(nproc) || make package/feeds/printing/cups/install -j1 V=s || exit 1
 
-          echo "=== Phase 2: Building Ghostscript (Memory Intensive) ==="
-          # 尝试多线程编译，如果失败则自动转为单线程详细模式
+          echo "=== Phase 2: Ghostscript ==="
+          # 核心保护逻辑：多线程失败自动转单线程
           make package/feeds/printing/ghostscript/install -j$(nproc) || \
-          (echo "Multi-thread failed, retrying with single-thread..." && \
-           make package/feeds/printing/ghostscript/install -j1 V=s) || exit 1
+          make package/feeds/printing/ghostscript/install -j1 V=s || exit 1
 
-          echo "=== Phase 3: Building Other Drivers ==="
+          echo "=== Phase 3: Other Drivers ==="
           PKGS=$(ls -1 package/feeds/printing)
           for pkg in $PKGS; do
             if [[ "$pkg" == "ghostscript" || "$pkg" == "cups" || "$pkg" == "hplip" || "$pkg" == python* ]]; then
@@ -86,11 +86,13 @@ jobs:
           cd $GITHUB_WORKSPACE/openwrt-sdk
           mkdir -p ALL_IPKS
           find bin/ -type f -name "*.ipk" ! -name "*-dbgsym_*" -exec cp {} ALL_IPKS/ \;
-          echo "=== Final IPK List ==="
-          [ -d "ALL_IPKS" ] && ls -lh ALL_IPKS || echo "No IPKs found!"
+          if [ -d "ALL_IPKS" ]; then
+            ls -lh ALL_IPKS
+            echo "Total IPKs: $(ls ALL_IPKS | wc -l)"
+          fi
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ipq807x-printing-ultra-stable
+          name: ipq807x-printing-final-stable
           path: openwrt-sdk/ALL_IPKS/
