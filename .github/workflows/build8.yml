@@ -1,4 +1,4 @@
-name: Build Printing Packages (IPQ807x SDK - Fixed Dependencies)
+name: Build Printing Packages (IPQ807x SDK - Final Clean)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,6 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        # 补齐了 python3-dev, itstool, gettext 等核心工具，解决 'does not exist' 警告
         sudo apt-get install -y build-essential gawk flex bison git wget unzip \
         python3 python3-pip python3-setuptools python3-wheel python3-dev \
         zstd libncurses-dev libssl-dev file rsync itstool gettext
@@ -34,11 +33,22 @@ jobs:
         ./scripts/feeds update -a >/dev/null
         ./scripts/feeds install -a >/dev/null
 
+        # 【核心补全：物理清障】
+        # 直接删除那些导致 Kconfig 崩溃的无关包，让配置系统恢复正常
+        rm -rf feeds/packages/mail/mutt feeds/packages/mail/postfix feeds/packages/mail/dovecot
+        rm -rf feeds/packages/admin/rsyslog feeds/packages/net/gensio feeds/packages/net/asterisk
+        rm -rf feeds/packages/utils/qemu feeds/packages/net/etebase
+        
+        # 针对 libcairo 循环依赖的手术：删掉会导致自选的配置行
+        find feeds/ -name "Config.in" -exec sed -i '/select PACKAGE_libcairo/d' {} + || true
+        
+        # 强制清理缓存并重新扫描
+        rm -rf tmp
+
         cat > .config <<'EOF'
         CONFIG_TARGET_qualcommax=y
         CONFIG_TARGET_qualcommax_ipq807x=y
         CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_aliyun_ap8220=y
-        # 核心包入场券
         CONFIG_PACKAGE_cups=y
         CONFIG_PACKAGE_ghostscript=y
         CONFIG_PACKAGE_lcms2=y
@@ -50,6 +60,7 @@ jobs:
         CONFIG_PACKAGE_cups-filters=y
         EOF
 
+        # 如果这一步能静默跑完，说明依赖地狱解脱了
         make defconfig >/dev/null
 
     - name: Build printing packages (auto scan)
@@ -59,10 +70,9 @@ jobs:
         for pkg in $(ls -1 package/feeds/printing); do
           if [ "$pkg" = "python3-dbus" ]; then continue; fi
           echo ">>> Processing $pkg ..."
-          # 依然使用你的 install 逻辑，但不再压制所有错误日志，方便观察
-          make package/feeds/printing/$pkg/install -j$(nproc) || echo "!!! $pkg failed"
+          # 增加 V=s 方便失败时看最后几行
+          make package/feeds/printing/$pkg/install -j$(nproc) || make package/feeds/printing/$pkg/install -j1 V=s || echo "!!! $pkg failed"
         done
-        echo "=== Build finished ==="
 
     - name: List generated IPK files
       run: |
