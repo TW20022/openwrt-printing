@@ -1,0 +1,111 @@
+name: Build Printing Packages (Final 10.07.0 & CUPS 2.4.16)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip \
+        python3-setuptools python3-wheel zstd libncurses-dev libssl-dev file rsync patch
+
+    - name: Download and extract SDK
+      run: |
+        wget -q https://downloads.openwrt.org/snapshots/targets/qualcommax/ipq807x/openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+        tar -xf openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+        mv openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64 openwrt-sdk
+
+    - name: Configure feeds
+      run: |
+        cd openwrt-sdk
+        cp feeds.conf.default feeds.conf
+        # 1. 引入最新的 CUPS 源 (2.4.16)
+        echo "src-git openprinting https://github.com/jackadam1981/OpenWrt_OpenPrinting_cups.git" >> feeds.conf
+        # 2. 引入打印包源
+        echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
+        
+        ./scripts/feeds update -a
+        # 强制安装新版 CUPS，覆盖自带版本
+        ./scripts/feeds install -p openprinting -f cups cups-filters
+        ./scripts/feeds install -p printing -a
+        ./scripts/feeds install luci-base
+
+    - name: Upgrade Ghostscript to 10.07.0
+      run: |
+        cd openwrt-sdk/package/feeds/printing/ghostscript
+        echo ">>> Modifying Makefile to 10.07.0..."
+        sed -i 's/PKG_VERSION:=.*/PKG_VERSION:=10.07.0/g' Makefile
+        sed -i 's/PKG_VERSION_LIBDIR:=.*/PKG_VERSION_LIBDIR:=10.07.0/g' Makefile
+        sed -i 's|PKG_SOURCE_URL:=.*|PKG_SOURCE_URL:=https://github.com/ArtifexSoftware/ghostpdl-downloads/releases/download/gs10070|g' Makefile
+        sed -i 's/PKG_HASH:=.*/PKG_HASH:=ed6ea62022e3f4d5a6569b6efc9361b63a6d118bfcad8f0beb897c37885b5cad/g' Makefile
+        
+        # 注入 CFLAGS 忽略 sprintf 告警（因为删除了 002 补丁）
+        sed -i '/TARGET_CFLAGS/ s/$/ -Wno-error=format-overflow -Wno-error=format-truncation/' Makefile
+        
+        # 删除会导致冲突的 002 补丁，保留 001 补丁
+        if [ -f "patches/002-fix-sprintf.patch" ]; then
+          rm -f patches/002-fix-sprintf.patch
+          echo ">>> Removed patch 002 to avoid conflicts."
+        fi
+
+    - name: Configure Target
+      run: |
+        cd openwrt-sdk
+        cat > .config <<'EOF'
+        CONFIG_TARGET_qualcommax=y
+        CONFIG_TARGET_qualcommax_ipq807x=y
+        CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_aliyun_ap8220=y
+        CONFIG_PACKAGE_cups=y
+        CONFIG_PACKAGE_ghostscript=y
+        EOF
+        
+        # 移除不需要的 luci 插件，只保留核心
+        echo "CONFIG_PACKAGE_luci-app-cupsd=n" >> .config
+        
+        make defconfig
+
+    - name: Build and Package
+      run: |
+        cd openwrt-sdk
+        echo "=== Phase 1: Building Core Dependencies ==="
+        # 先单独编译安装核心依赖，确保 Ghostscript 链接不报错
+        make package/feeds/openprinting/cups/install -j$(nproc) || exit 1
+        
+        echo "=== Phase 2: Building Ghostscript 10.07.0 ==="
+        # 预先执行 prepare 检查 001 补丁是否能打上
+        make package/feeds/printing/ghostscript/prepare V=s || exit 1
+        # 开始打包，如果多线程失败则单线程报错
+        make package/feeds/printing/ghostscript/install -j$(nproc) || \
+        make package/feeds/printing/ghostscript/install -j1 V=s || exit 1
+        
+        echo "=== Phase 3: Building Remaining Printing Packages ==="
+        PKGS=$(ls -1 package/feeds/printing)
+        for pkg in $PKGS; do
+          [ "$pkg" = "ghostscript" ] && continue
+          echo ">>> Packaging $pkg ..."
+          make package/feeds/printing/$pkg/install -j$(nproc) || echo "Skip $pkg"
+        done
+
+    - name: Collect and List IPKs
+      run: |
+        cd openwrt-sdk
+        mkdir -p ALL_IPKS
+        echo "=== Searching for generated IPK files ==="
+        # 深度搜索所有产物并集中
+        find bin/ -type f -name "*.ipk" ! -name "*-dbgsym_*" -exec cp {} ALL_IPKS/ \;
+        echo "Total IPKs collected: $(ls ALL_IPKS | wc -l)"
+        ls -lh ALL_IPKS/
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ipq807x-v10.07-v2.4.16
+        path: openwrt-sdk/ALL_IPKS/*.ipk
