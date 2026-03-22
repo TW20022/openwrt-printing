@@ -32,7 +32,7 @@ jobs:
         ./scripts/feeds update -a >/dev/null
         ./scripts/feeds install -a >/dev/null
 
-        # 精简 .config
+        cat > .config <<'EOF'
         CONFIG_TARGET_qualcommax=y
         CONFIG_TARGET_qualcommax_ipq807x=y
         CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_aliyun_ap8220=y
