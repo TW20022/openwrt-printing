@@ -18,6 +18,7 @@ jobs:
 
     - name: Download and extract SDK
       run: |
+        # 使用官方 snapshots SDK
         wget -q https://downloads.openwrt.org/snapshots/targets/qualcommax/ipq807x/openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64.tar.zst
         tar -xf openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64.tar.zst
         mv openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64 openwrt-sdk
@@ -48,10 +49,11 @@ jobs:
     - name: Build printing packages (auto scan)
       run: |
         cd openwrt-sdk
-        echo "=== Start building printing packages ==="
+        echo "=== Start building and packaging printing packages ==="
+        # 将 compile 改为 install 即可触发打包 ipk 逻辑
         for pkg in $(ls -1 package/feeds/printing); do
-          echo ">>> Building $pkg ..."
-          make package/feeds/printing/$pkg/compile -j$(nproc) >/dev/null 2>&1 || echo "!!! $pkg failed"
+          echo ">>> Processing $pkg (Build & Package) ..."
+          make package/feeds/printing/$pkg/install -j$(nproc) >/dev/null 2>&1 || echo "!!! $pkg failed"
         done
         echo "=== Build finished ==="
 
@@ -59,10 +61,12 @@ jobs:
       run: |
         cd openwrt-sdk
         echo "=== Printing IPK files ==="
-        find bin/packages -type f -name "*.ipk"
+        # 增加搜索范围，确保能列出 bin 下所有 ipk
+        find bin/ -type f -name "*.ipk"
 
     - name: Upload all IPK artifacts
       uses: actions/upload-artifact@v4
       with:
         name: all-ipk
-        path: openwrt-sdk/bin/packages/**/*.ipk
+        # 路径指向整个 bin 目录，确保不漏掉任何包
+        path: openwrt-sdk/bin/packages/
