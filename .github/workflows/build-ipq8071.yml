@@ -1,4 +1,4 @@
-name: Build Printing Packages (Final Stable - DD Swap)
+name: Build Printing Packages (ImmortalWrt - woniuzfb Full Chain)
 
 on:
   workflow_dispatch:
@@ -17,16 +17,15 @@ jobs:
           sudo apt-get install -y build-essential gawk flex bison git wget unzip python3 python3-pip \
           python3-setuptools python3-wheel zstd libncurses-dev libssl-dev file rsync patch
 
-      - name: Expand Swap Space (Fix Text file busy)
-        # 使用 dd 替代 fallocate，并先尝试 swapoff 确保路径可用
+      - name: Expand Swap Space (11GB Total RAM Protection)
         run: |
           sudo swapoff -a || true
-          sudo dd if=/dev/zero of=/swapfile2 bs=1M count=4096
-          sudo chmod 600 /swapfile2
-          sudo mkswap /swapfile2
-          sudo swapon /swapfile2
+          sudo dd if=/dev/zero of=/swapfile_final bs=1M count=4096
+          sudo chmod 600 /swapfile_final
+          sudo mkswap /swapfile_final
+          sudo swapon /swapfile_final
           free -h
-        continue-on-error: true # 即使 Swap 失败也继续，不让环境问题卡死编译
+        continue-on-error: true
 
       - name: Download and extract SDK
         run: |
@@ -34,16 +33,26 @@ jobs:
           tar -xf openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64.tar.zst
           mv openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64 openwrt-sdk
 
-      - name: Configure feeds
+      - name: Configure feeds & Resolve Conflicts
         run: |
           cd openwrt-sdk
           cp feeds.conf.default feeds.conf
-          echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
+          # 优先级：将 woniuzfb 源排在第一位
+          sed -i '1i src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git' feeds.conf
           ./scripts/feeds update -a
+          
+          # 物理清除 ImmortalWrt 内置的旧包路径
+          rm -rf package/utils/cups
+          rm -rf package/feeds/packages/cups
+          
+          # 强制安装 woniuzfb 的核心链（带 -f 参数确保覆盖）
+          ./scripts/feeds install -f -p printing cups ghostscript
           ./scripts/feeds install -f bison flex
-          ./scripts/feeds install -p printing -f cups ghostscript
+          # 安装 woniuzfb 仓库里剩下的所有依赖包 (lcms2, qpdf, poppler 等)
           ./scripts/feeds install -p printing -a
           ./scripts/feeds install luci-base
+          
+          rm -rf tmp/.packageinfo
 
       - name: Configure Target
         run: |
@@ -59,22 +68,36 @@ jobs:
           EOF
           make defconfig
 
-      - name: Build Printing Packages
+      - name: Build Printing Packages (Layered Execution)
         run: |
           cd openwrt-sdk
           
-          echo "=== Phase 1: CUPS ==="
-          make package/feeds/printing/cups/install -j$(nproc) || make package/feeds/printing/cups/install -j1 V=s || exit 1
+          echo "=== Phase 0: Building Common Dependencies (lcms2, qpdf, etc.) ==="
+          # 这些是 GS 和 CUPS 的地基，必须先编
+          for core in lcms2 libcairo libcupsfilters libppd qpdf poppler; do
+            if [ -d "package/feeds/printing/$core" ]; then
+              echo ">>> Pre-building $core ..."
+              make package/feeds/printing/$core/install -j$(nproc) || echo "$core failed, dependency might be in SDK"
+            fi
+          done
 
-          echo "=== Phase 2: Ghostscript ==="
-          # 核心保护逻辑：多线程失败自动转单线程
+          echo "=== Phase 1: Building CUPS (The Server) ==="
+          make package/feeds/printing/cups/install -j$(nproc) || \
+          make package/feeds/printing/cups/install -j1 V=s || exit 1
+
+          echo "=== Phase 2: Building Ghostscript (The Engine) ==="
+          # 使用多线程编译，失败自动切单线程并开启详细日志
           make package/feeds/printing/ghostscript/install -j$(nproc) || \
           make package/feeds/printing/ghostscript/install -j1 V=s || exit 1
 
-          echo "=== Phase 3: Other Drivers ==="
+          echo "=== Phase 3: Building Remaining Drivers (The Ecosystem) ==="
           PKGS=$(ls -1 package/feeds/printing)
           for pkg in $PKGS; do
-            if [[ "$pkg" == "ghostscript" || "$pkg" == "cups" || "$pkg" == "hplip" || "$pkg" == python* ]]; then
+            # 排除已编译和禁用的包
+            if [[ "$pkg" == "ghostscript" || "$pkg" == "cups" || "$pkg" == "hplip" || \
+                  "$pkg" == "lcms2" || "$pkg" == "libcairo" || "$pkg" == "libcupsfilters" || \
+                  "$pkg" == "libppd" || "$pkg" == "qpdf" || "$pkg" == "poppler" || \
+                  "$pkg" == python* ]]; then
               continue
             fi
             echo ">>> Packaging $pkg ..."
@@ -85,14 +108,18 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE/openwrt-sdk
           mkdir -p ALL_IPKS
+          # 深度搜索并拷贝所有生成的 IPK，排除调试包
           find bin/ -type f -name "*.ipk" ! -name "*-dbgsym_*" -exec cp {} ALL_IPKS/ \;
-          if [ -d "ALL_IPKS" ]; then
+          echo "=== Collected IPK Files ==="
+          if [ -d "ALL_IPKS" ] && [ "$(ls -A ALL_IPKS)" ]; then
             ls -lh ALL_IPKS
-            echo "Total IPKs: $(ls ALL_IPKS | wc -l)"
+            echo "Total IPK count: $(ls ALL_IPKS | wc -l)"
+          else
+            echo "No IPKs generated. Check build logs for errors."
           fi
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ipq807x-printing-final-stable
+          name: ipq807x-printing-full-set
           path: openwrt-sdk/ALL_IPKS/
