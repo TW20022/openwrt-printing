@@ -1,4 +1,4 @@
-name: Build Printing Packages (Legacy 10.06.0 - Fix IPK Output)
+name: Build Printing Packages (Final - High Stability)
 
 on:
   workflow_dispatch:
@@ -8,80 +8,89 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Install dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip \
-        python3-setuptools python3-wheel zstd libncurses-dev libssl-dev file rsync
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential gawk flex bison git wget unzip python3 python3-pip \
+          python3-setuptools python3-wheel zstd libncurses-dev libssl-dev file rsync patch
 
-    - name: Download and extract SDK
-      run: |
-        wget -q https://downloads.openwrt.org/snapshots/targets/qualcommax/ipq807x/openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-        tar -xf openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64.tar.zst
-        mv openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64 openwrt-sdk
+      - name: Expand Swap Space (Memory Protection)
+        # 增加 4GB 虚拟内存，防止 Ghostscript 链接时 OOM
+        run: |
+          sudo fallocate -l 4G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          free -h
 
-    - name: Configure feeds
-      run: |
-        cd openwrt-sdk
-        cp feeds.conf.default feeds.conf
-        echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
-        
-        ./scripts/feeds update -a
-        ./scripts/feeds install -p printing -a
-        ./scripts/feeds install luci-base luci-app-usb-printer
+      - name: Download and extract SDK
+        run: |
+          wget -q https://downloads.openwrt.org/snapshots/targets/qualcommax/ipq807x/openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+          tar -xf openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64.tar.zst
+          mv openwrt-sdk-qualcommax-ipq807x_gcc-14.3.0_musl.Linux-x86_64 openwrt-sdk
 
-    - name: Configure Target
-      run: |
-        cd openwrt-sdk
-        cat > .config <<'EOF'
-        CONFIG_TARGET_qualcommax=y
-        CONFIG_TARGET_qualcommax_ipq807x=y
-        CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_aliyun_ap8220=y
-        # 显式开启我们要的包，确保打包脚本生效
-        CONFIG_PACKAGE_cups=y
-        CONFIG_PACKAGE_ghostscript=y
-        EOF
-        
-        make defconfig
+      - name: Configure feeds
+        run: |
+          cd openwrt-sdk
+          cp feeds.conf.default feeds.conf
+          echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
+          ./scripts/feeds update -a
+          ./scripts/feeds install -f bison flex
+          ./scripts/feeds install -p printing -f cups ghostscript
+          ./scripts/feeds install -p printing -a
+          ./scripts/feeds install luci-base
 
-    - name: Build printing packages (Fixed Install Logic)
-      run: |
-        cd openwrt-sdk
-        echo "=== Start building and packaging ==="
-        
-        # 1. 先通过编译 cups 的 install 触发所有基础依赖库（如 zlib, libpng）的自动封包
-        # 这是解决你日志中“只看到 compile 没看到打包”的关键
-        make package/feeds/printing/cups/install -j$(nproc) || make package/feeds/printing/cups/install -j1 V=s
+      - name: Configure Target
+        run: |
+          cd openwrt-sdk
+          cat > .config <<'EOF'
+          CONFIG_TARGET_qualcommax=y
+          CONFIG_TARGET_qualcommax_ipq807x=y
+          CONFIG_TARGET_DEVICE_qualcommax_ipq807x_DEVICE_aliyun_ap8220=y
+          CONFIG_PACKAGE_cups=y
+          CONFIG_PACKAGE_ghostscript=y
+          EOF
+          echo "CONFIG_PACKAGE_python3-dbus=n" >> .config
+          echo "CONFIG_PACKAGE_hplip=n" >> .config
+          make defconfig
 
-        # 2. 循环执行 install
-        PKGS=$(ls -1 package/feeds/printing)
-        for pkg in $PKGS; do
-          echo ">>> Packaging $pkg ..."
-          # 使用 install 而不是 compile，install 包含编译+打包+拷贝到 bin 目录
-          make package/feeds/printing/$pkg/install -j$(nproc) || \
-          make package/feeds/printing/$pkg/install -j1 V=s || echo "!!! $pkg failed"
-        done
-        echo "=== Build finished ==="
+      - name: Build Printing Packages (With Failover Logic)
+        run: |
+          cd openwrt-sdk
+          
+          echo "=== Phase 1: Building CUPS ==="
+          make package/feeds/printing/cups/install -j$(nproc) || \
+          make package/feeds/printing/cups/install -j1 V=s || exit 1
 
-    - name: List and Collect IPKs
-      run: |
-        cd openwrt-sdk
-        echo "=== Deep search for IPK files ==="
-        # 创建一个汇总文件夹，防止 upload-artifact 因为找不到路径报错
-        mkdir -p ALL_OUTPUT_IPKS
-        
-        # 搜索所有生成的 ipk，并移动到汇总文件夹
-        # 排除掉 dbgsym 调试包以节省空间
-        find bin/ -type f -name "*.ipk" ! -name "*-dbgsym_*" -exec cp {} ALL_OUTPUT_IPKS/ \;
-        
-        echo "Total IPKs collected: $(ls ALL_OUTPUT_IPKS | wc -l)"
-        ls -lh ALL_OUTPUT_IPKS/
+          echo "=== Phase 2: Building Ghostscript (Memory Intensive) ==="
+          # 尝试多线程编译，如果失败则自动转为单线程详细模式
+          make package/feeds/printing/ghostscript/install -j$(nproc) || \
+          (echo "Multi-thread failed, retrying with single-thread..." && \
+           make package/feeds/printing/ghostscript/install -j1 V=s) || exit 1
 
-    - name: Upload Artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: ipq807x-printing-v10.06-fixed
-        path: openwrt-sdk/ALL_OUTPUT_IPKS/*.ipk
+          echo "=== Phase 3: Building Other Drivers ==="
+          PKGS=$(ls -1 package/feeds/printing)
+          for pkg in $PKGS; do
+            if [[ "$pkg" == "ghostscript" || "$pkg" == "cups" || "$pkg" == "hplip" || "$pkg" == python* ]]; then
+              continue
+            fi
+            echo ">>> Packaging $pkg ..."
+            make package/feeds/printing/$pkg/install -j$(nproc) || echo "Skip $pkg"
+          done
+
+      - name: Collect and List IPKs
+        run: |
+          cd $GITHUB_WORKSPACE/openwrt-sdk
+          mkdir -p ALL_IPKS
+          find bin/ -type f -name "*.ipk" ! -name "*-dbgsym_*" -exec cp {} ALL_IPKS/ \;
+          echo "=== Final IPK List ==="
+          [ -d "ALL_IPKS" ] && ls -lh ALL_IPKS || echo "No IPKs found!"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipq807x-printing-ultra-stable
+          path: openwrt-sdk/ALL_IPKS/
