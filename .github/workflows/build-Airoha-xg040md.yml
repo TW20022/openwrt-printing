@@ -42,35 +42,27 @@ jobs:
 
         make defconfig
 
-    - name: Show printing feed packages
-      run: |
-        cd openwrt-sdk
-        echo "=== Printing feed packages ==="
-        ls -1 package/feeds/printing
-
     - name: Build printing packages (Safe Loop)
       run: |
         cd openwrt-sdk
         echo "=== Start building printing packages ==="
         
-        # 1. 核心关键：先编译全局依赖（这一步会把 cups, ghostscript 依赖的所有底层库先编出来）
-        echo ">>> Pre-building all package dependencies (this may take a while) ..."
-        make package/download -j$(nproc)
-        make package/compile -j$(nproc) || echo "Pre-build compilation encountered errors, but proceeding to specific targets..."
-        
-        # 2. 循环遍历编译 printing 下的所有目标包
+        # 1. 放弃全局大编译，只针对 printing feed 里的包进行单独的依赖下载和编译
         for pkg in $(ls -1 package/feeds/printing); do
           echo "============================================="
           echo ">>> [START] Building printing package: $pkg"
           echo "============================================="
           
-          # 去掉了旧脚本的静音限制，加上 V=s 打印详细日志。
-          # 加上 || true 或 echo 确保即使单包失败，循环也不会中断，继续编下一个。
+          # 先单独下载该包及其依赖的源码
+          make package/feeds/printing/$pkg/download V=s || echo ">>> Download for $pkg failed, trying to compile anyway..."
+          
+          # 精准编译该包（OpenWrt 会自动且仅编译它自身需要的底层依赖，不会去碰无关的 gcc 等包）
+          # 加上 || true 确保单个包失败不影响大局
           make package/feeds/printing/$pkg/compile -j$(nproc) V=s || echo "!!! [FAILURE] $pkg failed to compile, skipping..."
           
           echo ">>> [END] Finished $pkg"
         done
-        echo "=== Build finished ==="
+        echo "=== Build finished ==
 
     - name: List generated IPK files
       run: |
