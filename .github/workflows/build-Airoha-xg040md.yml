@@ -1,0 +1,85 @@
+name: Build All Printing Packages (Airoha AN7581 SDK)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd
+
+    - name: Download and extract SDK
+      run: |
+        wget -q https://downloads.openwrt.org/snapshots/targets/airoha/an7581/openwrt-sdk-airoha-an7581_gcc-14.4.0_musl.Linux-x86_64.tar.zst
+        tar -xf openwrt-sdk-airoha-an7581_gcc-14.4.0_musl.Linux-x86_64.tar.zst
+        mv openwrt-sdk-airoha-an7581_gcc-14.4.0_musl.Linux-x86_64 openwrt-sdk
+
+    - name: Configure feeds and target
+      run: |
+        cd openwrt-sdk
+        cp feeds.conf.default feeds.conf
+        echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
+        
+        # 核心修改：更新并安装所有 feeds。
+        # 必须确保 base 和 packages 这两个官方源也全装上，否则 cups 等包会找不到底层依赖库
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
+
+        # 配置针对 airoha/an7581 架构
+        cat > .config <<'EOF'
+        CONFIG_TARGET_airoha=y
+        CONFIG_TARGET_airoha_an7581=y
+        CONFIG_TARGET_airoha_an7581_DEVICE_nokia_xg-040g-md=y
+        EOF
+
+        make defconfig
+
+    - name: Show printing feed packages
+      run: |
+        cd openwrt-sdk
+        echo "=== Printing feed packages ==="
+        ls -1 package/feeds/printing
+
+    - name: Build printing packages (Safe Loop)
+      run: |
+        cd openwrt-sdk
+        echo "=== Start building printing packages ==="
+        
+        # 1. 核心关键：先编译全局依赖（这一步会把 cups, ghostscript 依赖的所有底层库先编出来）
+        echo ">>> Pre-building all package dependencies (this may take a while) ..."
+        make package/download -j$(nproc)
+        make package/compile -j$(nproc) || echo "Pre-build compilation encountered errors, but proceeding to specific targets..."
+        
+        # 2. 循环遍历编译 printing 下的所有目标包
+        for pkg in $(ls -1 package/feeds/printing); do
+          echo "============================================="
+          echo ">>> [START] Building printing package: $pkg"
+          echo "============================================="
+          
+          # 去掉了旧脚本的静音限制，加上 V=s 打印详细日志。
+          # 加上 || true 或 echo 确保即使单包失败，循环也不会中断，继续编下一个。
+          make package/feeds/printing/$pkg/compile -j$(nproc) V=s || echo "!!! [FAILURE] $pkg failed to compile, skipping..."
+          
+          echo ">>> [END] Finished $pkg"
+        done
+        echo "=== Build finished ==="
+
+    - name: List generated IPK files
+      run: |
+        cd openwrt-sdk
+        echo "=== Printing IPK files ==="
+        find bin/packages -type f -name "*.ipk"
+
+    - name: Upload all IPK artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: airoha-an7581-printing-ipk
+        path: openwrt-sdk/bin/packages/**/*.ipk
