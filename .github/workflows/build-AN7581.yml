@@ -1,4 +1,4 @@
-Name: Build Printing Packages (Airoha AN7581 SDK)
+name: Build Printing Packages (Airoha AN7581 SDK)
 
 on:
   workflow_dispatch:
