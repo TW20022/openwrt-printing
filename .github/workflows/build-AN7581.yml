@@ -1,0 +1,70 @@
+Name: Build Printing Packages (Airoha AN7581 SDK)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd
+
+    # 【修改点 1 & 2】: 替换为快照版的 airoha/an7581 SDK 链接和对应的解压目录名
+    - name: Download and extract SDK
+      run: |
+        wget -q https://downloads.openwrt.org/snapshots/targets/airoha/an7581/openwrt-sdk-airoha-an7581_gcc-14.4.0_musl.Linux-x86_64.tar.zst
+        tar -xf openwrt-sdk-airoha-an7581_gcc-14.4.0_musl.Linux-x86_64.tar.zst
+        mv openwrt-sdk-airoha-an7581_gcc-14.4.0_musl.Linux-x86_64 openwrt-sdk
+
+    # 【修改点 3 & 4】: 更改 .config 中的 Target 目标架构为 airoha 和 an7581
+    - name: Configure feeds and target
+      run: |
+        cd openwrt-sdk
+        cp feeds.conf.default feeds.conf
+        echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
+        ./scripts/feeds update -a >/dev/null
+        ./scripts/feeds install -a >/dev/null
+
+        # 精简 .config 针对 airoha/an7581 进行修改
+        cat > .config <<'EOF'
+        CONFIG_TARGET_airoha=y
+        CONFIG_TARGET_airoha_an7581=y
+        CONFIG_TARGET_airoha_an7581_DEVICE_nokia_xg-040g-md=y
+        EOF
+
+        make defconfig >/dev/null
+
+    - name: Show printing feed packages
+      run: |
+        cd openwrt-sdk
+        echo "=== Printing feed packages ==="
+        ls -1 package/feeds/printing
+
+    - name: Build printing packages (auto scan)
+      run: |
+        cd openwrt-sdk
+        echo "=== Start building printing packages ==="
+        for pkg in $(ls -1 package/feeds/printing); do
+          echo ">>> Building $pkg ..."
+          make package/feeds/printing/$pkg/compile -j$(nproc) >/dev/null 2>&1 || echo "!!! $pkg failed"
+        done
+        echo "=== Build finished ==="
+
+    - name: List generated IPK files
+      run: |
+        cd openwrt-sdk
+        echo "=== Printing IPK files ==="
+        find bin/packages -type f -name "*.ipk"
+
+    - name: Upload all IPK artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: all-ipk
+        path: openwrt-sdk/bin/packages/**/*.ipk
