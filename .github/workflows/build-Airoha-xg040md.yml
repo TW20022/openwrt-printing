@@ -16,27 +16,44 @@ jobs:
         sudo apt-get update
         sudo apt-get install -y build-essential gawk flex git wget unzip python3 zstd
 
+    # 【核心修复】：动态获取最新的 SDK 真实下载链接，防止官方删档导致下载失败
     - name: Download and extract SDK
       run: |
-        wget -q https://downloads.openwrt.org/snapshots/targets/airoha/an7581/openwrt-sdk-airoha-an7581_gcc-14.4.0_musl.Linux-x86_64.tar.zst
-        tar -xf openwrt-sdk-airoha-an7581_gcc-14.4.0_musl.Linux-x86_64.tar.zst
-        mv openwrt-sdk-airoha-an7581_gcc-14.4.0_musl.Linux-x86_64 openwrt-sdk
+        TARGET_URL="https://downloads.openwrt.org/snapshots/targets/airoha/an7581/"
+        echo "=== 正在获取官方最新完整的 SDK 文件名 ==="
+        
+        # 自动从官方页面匹配以 openwrt-sdk-airoha-an7581 开头、以 .tar.zst 结尾的最新文件名
+        SDK_NAME=$(wget -qO- "$TARGET_URL" | grep -o 'openwrt-sdk-airoha-an7581_[^"]*\.tar\.zst' | head -n 1)
+        
+        if [ -z "$SDK_NAME" ]; then
+          echo "❌ 未能从官方页面抓取到有效的 SDK 文件名，请检查官网目录！"
+          exit 1
+        fi
+        
+        echo "最新 SDK 文件名为: $SDK_NAME"
+        echo "开始下载: ${TARGET_URL}${SDK_NAME}"
+        
+        # 使用连接重试与断点续传，确保下载完整
+        wget -c "$TARGET_URL$SDK_NAME"
+        
+        echo "=== 开始解压 ==="
+        tar -xf "$SDK_NAME"
+        
+        # 统一重命名为 openwrt-sdk 方便后续步骤执行
+        mv openwrt-sdk-airoha-an7581_* openwrt-sdk
 
     - name: Configure feeds
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
-        # 引入第三方打印包源
         echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
         ./scripts/feeds update -a
         ./scripts/feeds install cups
 
-        # 配置架构环境
         cat > .config <<'EOF'
         CONFIG_TARGET_airoha=y
         CONFIG_TARGET_airoha_an7581=y
         CONFIG_TARGET_airoha_an7581_DEVICE_nokia_xg-040g-md=y
-        # 强制将 cups 设为模块编译
         CONFIG_PACKAGE_cups=m
         EOF
         
@@ -45,11 +62,9 @@ jobs:
     - name: Pre-download Precompiled Dependencies (Trick)
       run: |
         cd openwrt-sdk
-        # 【修正点】目录名变更为 aarch64_generic
         mkdir -p bin/packages/aarch64_generic/base bin/packages/aarch64_generic/packages
         
-        # 直接去官方 aarch64_generic 目录下载预编译好的依赖包（zlib、libpng、gdbm）
-        BASE_URL="https://downloads.openwrt.org/snapshots/packages/aarch64_generic"
+        BASE_URL="https://downloads.openwrt.org/snapshots/packages/aarch64_cortex-a53"
         
         wget -q "$BASE_URL/base/Packages.gz" -O Packages_base.gz
         wget -q "$BASE_URL/packages/Packages.gz" -O Packages_pkgs.gz
@@ -70,14 +85,12 @@ jobs:
       run: |
         cd openwrt-sdk
         echo "=== 开始精准编译 CUPS ==="
-        # 仅编译 cups 本体，不加全局干扰
         make package/feeds/printing/cups/compile -j$(nproc) V=s || echo "编译失败"
 
     - name: Collect IPK Files
       run: |
         cd openwrt-sdk
         mkdir -p ../output_ipks
-        # 把刚编好的 cups 和刚才下载的依赖拷贝到一起
         find bin/packages/ -type f -name "*.ipk" -exec cp {} ../output_ipks/ \;
 
     - name: Upload Artifacts
