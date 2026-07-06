@@ -45,29 +45,32 @@ jobs:
     - name: Pre-download Precompiled Dependencies (Trick)
       run: |
         cd openwrt-sdk
-        mkdir -p bin/packages/aarch64_cortex-a53/base bin/packages/aarch64_cortex-a53/packages
+        # 【修正点】目录名变更为 aarch64_generic
+        mkdir -p bin/packages/aarch64_generic/base bin/packages/aarch64_generic/packages
         
-        # 核心黑科技：直接去官方源把预编译好的依赖包（zlib、libpng、gdbm）下载并放到 SDK 的输出目录中
-        # 这样 SDK 在编译 cups 时，会发现依赖已经由官方编好了，就会直接跳过工具链的编译！
-        BASE_URL="https://downloads.openwrt.org/snapshots/packages/aarch64_cortex-a53"
+        # 直接去官方 aarch64_generic 目录下载预编译好的依赖包（zlib、libpng、gdbm）
+        BASE_URL="https://downloads.openwrt.org/snapshots/packages/aarch64_generic"
         
-        wget -qO- $BASE_URL/base/Packages.gz | zcat > Packages_base
-        wget -qO- $BASE_URL/packages/Packages.gz | zcat > Packages_pkgs
+        wget -q "$BASE_URL/base/Packages.gz" -O Packages_base.gz
+        wget -q "$BASE_URL/packages/Packages.gz" -O Packages_pkgs.gz
+        
+        zcat Packages_base.gz > Packages_base
+        zcat Packages_pkgs.gz > Packages_pkgs
         
         ZLIB_FILE=$(grep -o 'Filename: zlib_.*\.ipk' Packages_base | head -n 1 | cut -d' ' -f2)
         LIBPNG_FILE=$(grep -o 'Filename: libpng_.*\.ipk' Packages_pkgs | head -n 1 | cut -d' ' -f2)
         GDBM_FILE=$(grep -o 'Filename: gdbm_.*\.ipk' Packages_pkgs | head -n 1 | cut -d' ' -f2)
         
-        wget -P bin/packages/aarch64_cortex-a53/base/ "$BASE_URL/base/$ZLIB_FILE"
-        wget -P bin/packages/aarch64_cortex-a53/packages/ "$BASE_URL/packages/$LIBPNG_FILE"
-        wget -P bin/packages/aarch64_cortex-a53/packages/ "$BASE_URL/packages/$GDBM_FILE"
+        wget -q -P bin/packages/aarch64_generic/base/ "$BASE_URL/base/$ZLIB_FILE"
+        wget -q -P bin/packages/aarch64_generic/packages/ "$BASE_URL/packages/$LIBPNG_FILE"
+        wget -q -P bin/packages/aarch64_generic/packages/ "$BASE_URL/packages/$GDBM_FILE"
         echo "=== 官方依赖包伪装完成 ==="
 
     - name: Build CUPS Only
       run: |
         cd openwrt-sdk
         echo "=== 开始精准编译 CUPS ==="
-        # 仅编译 cups 本体，不加全局干扰，带上 V=s 方便查看日志
+        # 仅编译 cups 本体，不加全局干扰
         make package/feeds/printing/cups/compile -j$(nproc) V=s || echo "编译失败"
 
     - name: Collect IPK Files
