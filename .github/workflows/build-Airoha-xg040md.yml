@@ -1,4 +1,4 @@
-name: Build All Printing Packages (Airoha AN7581 SDK)
+name: Build CUPS Single Package (Airoha AN7581)
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd
+        sudo apt-get install -y build-essential gawk flex git wget unzip python3 zstd
 
     - name: Download and extract SDK
       run: |
@@ -22,56 +22,63 @@ jobs:
         tar -xf openwrt-sdk-airoha-an7581_gcc-14.4.0_musl.Linux-x86_64.tar.zst
         mv openwrt-sdk-airoha-an7581_gcc-14.4.0_musl.Linux-x86_64 openwrt-sdk
 
-    - name: Configure feeds and target
+    - name: Configure feeds
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
+        # 引入第三方打印包源
         echo "src-git printing https://github.com/woniuzfb/openwrt-24-printing-packages.git" >> feeds.conf
-        
-        # 核心修改：更新并安装所有 feeds。
-        # 必须确保 base 和 packages 这两个官方源也全装上，否则 cups 等包会找不到底层依赖库
         ./scripts/feeds update -a
-        ./scripts/feeds install -a
+        ./scripts/feeds install cups
 
-        # 配置针对 airoha/an7581 架构
+        # 配置架构环境
         cat > .config <<'EOF'
         CONFIG_TARGET_airoha=y
         CONFIG_TARGET_airoha_an7581=y
         CONFIG_TARGET_airoha_an7581_DEVICE_nokia_xg-040g-md=y
+        # 强制将 cups 设为模块编译
+        CONFIG_PACKAGE_cups=m
         EOF
-
+        
         make defconfig
 
-    - name: Build printing packages (Safe Loop)
+    - name: Pre-download Precompiled Dependencies (Trick)
       run: |
         cd openwrt-sdk
-        echo "=== Start building printing packages ==="
+        mkdir -p bin/packages/aarch64_cortex-a53/base bin/packages/aarch64_cortex-a53/packages
         
-        # 1. 放弃全局大编译，只针对 printing feed 里的包进行单独的依赖下载和编译
-        for pkg in $(ls -1 package/feeds/printing); do
-          echo "============================================="
-          echo ">>> [START] Building printing package: $pkg"
-          echo "============================================="
-          
-          # 先单独下载该包及其依赖的源码
-          make package/feeds/printing/$pkg/download V=s || echo ">>> Download for $pkg failed, trying to compile anyway..."
-          
-          # 精准编译该包（OpenWrt 会自动且仅编译它自身需要的底层依赖，不会去碰无关的 gcc 等包）
-          # 加上 || true 确保单个包失败不影响大局
-          make package/feeds/printing/$pkg/compile -j$(nproc) V=s || echo "!!! [FAILURE] $pkg failed to compile, skipping..."
-          
-          echo ">>> [END] Finished $pkg"
-        done
-        echo "=== Build finished ==
+        # 核心黑科技：直接去官方源把预编译好的依赖包（zlib、libpng、gdbm）下载并放到 SDK 的输出目录中
+        # 这样 SDK 在编译 cups 时，会发现依赖已经由官方编好了，就会直接跳过工具链的编译！
+        BASE_URL="https://downloads.openwrt.org/snapshots/packages/aarch64_cortex-a53"
+        
+        wget -qO- $BASE_URL/base/Packages.gz | zcat > Packages_base
+        wget -qO- $BASE_URL/packages/Packages.gz | zcat > Packages_pkgs
+        
+        ZLIB_FILE=$(grep -o 'Filename: zlib_.*\.ipk' Packages_base | head -n 1 | cut -d' ' -f2)
+        LIBPNG_FILE=$(grep -o 'Filename: libpng_.*\.ipk' Packages_pkgs | head -n 1 | cut -d' ' -f2)
+        GDBM_FILE=$(grep -o 'Filename: gdbm_.*\.ipk' Packages_pkgs | head -n 1 | cut -d' ' -f2)
+        
+        wget -P bin/packages/aarch64_cortex-a53/base/ "$BASE_URL/base/$ZLIB_FILE"
+        wget -P bin/packages/aarch64_cortex-a53/packages/ "$BASE_URL/packages/$LIBPNG_FILE"
+        wget -P bin/packages/aarch64_cortex-a53/packages/ "$BASE_URL/packages/$GDBM_FILE"
+        echo "=== 官方依赖包伪装完成 ==="
 
-    - name: List generated IPK files
+    - name: Build CUPS Only
       run: |
         cd openwrt-sdk
-        echo "=== Printing IPK files ==="
-        find bin/packages -type f -name "*.ipk"
+        echo "=== 开始精准编译 CUPS ==="
+        # 仅编译 cups 本体，不加全局干扰，带上 V=s 方便查看日志
+        make package/feeds/printing/cups/compile -j$(nproc) V=s || echo "编译失败"
 
-    - name: Upload all IPK artifacts
+    - name: Collect IPK Files
+      run: |
+        cd openwrt-sdk
+        mkdir -p ../output_ipks
+        # 把刚编好的 cups 和刚才下载的依赖拷贝到一起
+        find bin/packages/ -type f -name "*.ipk" -exec cp {} ../output_ipks/ \;
+
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: airoha-an7581-printing-ipk
-        path: openwrt-sdk/bin/packages/**/*.ipk
+        name: XG-040G-MD-CUPS-Pack
+        path: output_ipks/*.ipk
