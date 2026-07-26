@@ -1,4 +1,4 @@
-name: Build Specific Printing Packages (MT7621 SDK)
+name: Build Printing Packages (MT7621 SDK)
 
 on:
   workflow_dispatch:
@@ -14,8 +14,8 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        # 安装 host 编译所需的开发库
-        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd libcups2-dev libfontconfig1-dev libjpeg-dev libpng-dev
+        # 1. 补充 Ubuntu 宿主机编译 host 语言/图像工具(ghostscript host)所需的开发库
+        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd libcups2-dev libfontconfig1-dev libjpeg-dev libpng-dev zlib1g-dev liblcms2-dev
 
     - name: Download and extract SDK
       run: |
@@ -28,18 +28,12 @@ jobs:
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
 
-        # 1. 引入官方 24.10 packages 源（提供经过官方修复适配的 ghostscript）
-        echo "src-git packages https://git.openwrt.org/feed/packages.git^openwrt-24.10" >> feeds.conf
-        # 2. 引入第三方打印源
+        # 引入包含你所需文件的 master-0123 第三方打印源
         echo "src-git printing https://github.com/master-0123/openwrt-printing-packages.git" >> feeds.conf
 
         ./scripts/feeds update -a
+        ./scripts/feeds install -a -p printing
 
-        # 关键一步：如果第三方源里有坏掉的 ghostscript，优先使用官方 packages 源里的 ghostscript
-        ./scripts/feeds install -p packages ghostscript || true
-        ./scripts/feeds install -a
-
-        # 明确配置目标平台为 MT7621
         cat > .config <<'EOF'
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
@@ -48,17 +42,25 @@ jobs:
 
         make defconfig >/dev/null
 
+    - name: Fix Ghostscript Host CFLAGS (Fix GCC 13 build break)
+      run: |
+        cd openwrt-sdk
+        # 如果仓库里存在 ghostscript，注入 -Wno-error 容错参数，防止 GCC 13 将老代码警告当错误拦截
+        if [ -d "package/feeds/printing/ghostscript" ]; then
+          sed -i 's/HOST_CONFIGURE_ARGS:=/HOST_CONFIGURE_ARGS:= CFLAGS="-Wno-error -Wno-implicit-function-declaration" /g' package/feeds/printing/ghostscript/Makefile || true
+        fi
+
     - name: Build target printing packages
       run: |
         cd openwrt-sdk
         echo "=== Start building target packages ==="
 
-        # 定义所需包（加入 libjbigkit 防缺依赖）
-        TARGET_PACKAGES="libjbigkit foo2zjs foo2zjs-extra foomatic-filters gutenprint"
+        # 按依赖顺序编译你需要的 4 个包（加上 libjbigkit 共 5 个）
+        TARGET_PACKAGES="libjbigkit foomatic-filters foo2zjs foo2zjs-extra gutenprint"
 
         for pkg in $TARGET_PACKAGES; do
           echo ">>> [Building] $pkg ..."
-          # 多线程失败后自动回退单线程，并在日志打印详细 C 语言编译报错
+          # 先并行编译，如果报错自动降级为单线程 -j1 V=s 打印精确报错，且不打断后续包编译
           make package/feeds/printing/$pkg/compile -j$(nproc) || make package/feeds/printing/$pkg/compile -j1 V=s || echo "!!! [Failed] $pkg failed"
         done
 
