@@ -14,7 +14,8 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd
+        # 安装 host 编译所需的开发库
+        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd libcups2-dev libfontconfig1-dev libjpeg-dev libpng-dev
 
     - name: Download and extract SDK
       run: |
@@ -26,16 +27,23 @@ jobs:
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
-        # 引入指定的打印包仓库
-        echo "src-git printing https://github.com/master-0123/openwrt-printing-packages.git" >> feeds.conf
-        
-        ./scripts/feeds update -a
-        ./scripts/feeds install -a -p printing
 
+        # 1. 引入官方 24.10 packages 源（提供经过官方修复适配的 ghostscript）
+        echo "src-git packages https://git.openwrt.org/feed/packages.git^openwrt-24.10" >> feeds.conf
+        # 2. 引入第三方打印源
+        echo "src-git printing https://github.com/master-0123/openwrt-printing-packages.git" >> feeds.conf
+
+        ./scripts/feeds update -a
+
+        # 关键一步：如果第三方源里有坏掉的 ghostscript，优先使用官方 packages 源里的 ghostscript
+        ./scripts/feeds install -p packages ghostscript || true
+        ./scripts/feeds install -a
+
+        # 明确配置目标平台为 MT7621
         cat > .config <<'EOF'
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
-        CONFIG_TARGET_ramips_mt7621_Generic=y
+        CONFIG_TARGET_ramips_mt7621_DEVICE_sanji_ra-x3000qy=y
         EOF
 
         make defconfig >/dev/null
@@ -44,15 +52,16 @@ jobs:
       run: |
         cd openwrt-sdk
         echo "=== Start building target packages ==="
-        
-        # 定义你需要的 4 个包
-        TARGET_PACKAGES="foo2zjs foo2zjs-extra foomatic-filters gutenprint"
-        
+
+        # 定义所需包（加入 libjbigkit 防缺依赖）
+        TARGET_PACKAGES="libjbigkit foo2zjs foo2zjs-extra foomatic-filters gutenprint"
+
         for pkg in $TARGET_PACKAGES; do
           echo ">>> [Building] $pkg ..."
-          make package/feeds/printing/$pkg/compile -j$(nproc) || echo "!!! [Failed] $pkg failed"
+          # 多线程失败后自动回退单线程，并在日志打印详细 C 语言编译报错
+          make package/feeds/printing/$pkg/compile -j$(nproc) || make package/feeds/printing/$pkg/compile -j1 V=s || echo "!!! [Failed] $pkg failed"
         done
-        
+
         echo "=== Build finished ==="
 
     - name: List generated IPK files
