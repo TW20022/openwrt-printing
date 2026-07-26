@@ -19,7 +19,6 @@ jobs:
 
     - name: Download and extract SDK
       run: |
-        # 修正版本号为官方 24.10.5 稳定版 SDK
         wget -q https://downloads.openwrt.org/releases/24.10.5/targets/ramips/mt7621/openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
         tar -xf openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
         mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
@@ -29,81 +28,76 @@ jobs:
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
-        # 引入官方 packages feed 以获取 libcups, libjbigkit 等依赖
         echo "src-git packages https://git.openwrt.org/feed/packages.git" >> feeds.conf
 
         ./scripts/feeds update -a
-        # 仅通过 feeds 安装 SpliX 依赖的基础库，不安装 splix
-        ./scripts/feeds install libcups libstdcpp libjbigkit zlib libjpeg
+        ./scripts/feeds install libcups libstdcpp zlib libjpeg-turbo jbigkit libjbigkit
 
     - name: Inject Custom SpliX Package
       run: |
-        # 手动创建独立的 splix 包目录
         mkdir -p openwrt-sdk/package/splix
-        cat > openwrt-sdk/package/splix/Makefile <<'EOF'
-include $(TOPDIR)/rules.mk
+        cat << 'EOF' > openwrt-sdk/package/splix/Makefile
+        include $(TOPDIR)/rules.mk
 
-PKG_NAME:=splix
-PKG_VERSION:=2.0.0
-PKG_RELEASE:=1
+        PKG_NAME:=splix
+        PKG_VERSION:=2.0.0
+        PKG_RELEASE:=1
 
-PKG_SOURCE_PROTO:=git
-PKG_SOURCE_URL:=https://github.com/mdeweerd/splix.git
-PKG_SOURCE_VERSION:=v$(PKG_VERSION)
-PKG_MIRROR_HASH:=skip
+        PKG_SOURCE_PROTO:=git
+        PKG_SOURCE_URL:=https://github.com/mdeweerd/splix.git
+        PKG_SOURCE_VERSION:=v$(PKG_VERSION)
+        PKG_MIRROR_HASH:=skip
 
-PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
+        PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
 
-include $(INCLUDE_DIR)/package.mk
+        include $(INCLUDE_DIR)/package.mk
 
-define Package/splix
-  SECTION:=utils
-  CATEGORY:=Utilities
-  SUBMENU:=Printing
-  TITLE:=Samsung/Xerox SPL printer driver for CUPS
-  DEPENDS:=+libcups +libstdcpp +zlib +libjpeg +libjbigkit
-  URL:=https://github.com/mdeweerd/splix
-endef
+        define Package/splix
+          SECTION:=utils
+          CATEGORY:=Utilities
+          SUBMENU:=Printing
+          TITLE:=Samsung/Xerox SPL printer driver for CUPS
+          DEPENDS:=+libcups +libstdcpp +zlib +libjpeg +libjbigkit
+          URL:=https://github.com/mdeweerd/splix
+        endef
 
-define Package/splix/description
-  SpliX is a set of CUPS drivers for SPL (Samsung Printer Language) printers.
-  It provides rastertoqpdl filter for Samsung ML/CLP/SCX series printers.
-endef
+        define Package/splix/description
+          SpliX is a set of CUPS drivers for SPL (Samsung Printer Language) printers.
+          It provides rastertoqpdl filter for Samsung ML/CLP/SCX series printers.
+        endef
 
-# 传递编译标志：指定交叉编译 cups-config，并容错 GCC 13 Warning
-MAKE_FLAGS += \
-	CUPSCONFIG="$(STAGING_DIR)/usr/bin/cups-config" \
-	OPTIM_CFLAGS="$(TARGET_CFLAGS) -Wno-error" \
-	OPTIM_CXXFLAGS="$(TARGET_CXXFLAGS) -Wno-error -std=gnu++11"
+        MAKE_FLAGS += \
+        	CUPSCONFIG="$(STAGING_DIR)/usr/bin/cups-config" \
+        	OPTIM_CFLAGS="$(TARGET_CFLAGS) -Wno-error" \
+        	OPTIM_CXXFLAGS="$(TARGET_CXXFLAGS) -Wno-error -std=gnu++11"
 
-define Package/splix/install
-	$(INSTALL_DIR) $(1)/usr/lib/cups/filter
-	$(INSTALL_BIN) $(PKG_BUILD_DIR)/splix/optimized/rastertoqpdl $(1)/usr/lib/cups/filter/
-	$(INSTALL_DIR) $(1)/usr/share/cups/model
-	$(CP) $(PKG_BUILD_DIR)/splix/ppd/* $(1)/usr/share/cups/model/ 2>/dev/null || true
-endef
+        define Package/splix/install
+        	$(INSTALL_DIR) $(1)/usr/lib/cups/filter
+        	$(INSTALL_BIN) $(PKG_BUILD_DIR)/splix/optimized/rastertoqpdl $(1)/usr/lib/cups/filter/
+        	$(INSTALL_DIR) $(1)/usr/share/cups/model
+        	$(CP) $(PKG_BUILD_DIR)/splix/ppd/* $(1)/usr/share/cups/model/ 2>/dev/null || true
+        endef
 
-$(eval $(call BuildPackage,splix))
-EOF
+        $(eval $(call BuildPackage,splix))
+        EOF
 
     - name: Configure target
       run: |
         cd openwrt-sdk
         cat > .config <<'EOF'
-CONFIG_TARGET_ramips=y
-CONFIG_TARGET_ramips_mt7621=y
-CONFIG_TARGET_ramips_mt7621_DEVICE_sanji_ra-x3000qy=y
-CONFIG_PACKAGE_libcups=y
-CONFIG_PACKAGE_libstdcpp=y
-CONFIG_PACKAGE_libjbigkit=y
-CONFIG_PACKAGE_splix=y
-EOF
+        CONFIG_TARGET_ramips=y
+        CONFIG_TARGET_ramips_mt7621=y
+        CONFIG_TARGET_ramips_mt7621_DEVICE_sanji_ra-x3000qy=y
+        CONFIG_PACKAGE_libcups=y
+        CONFIG_PACKAGE_libstdcpp=y
+        CONFIG_PACKAGE_libjbigkit=y
+        CONFIG_PACKAGE_splix=y
+        EOF
         make defconfig >/dev/null
 
     - name: Build SpliX package
       run: |
         cd openwrt-sdk
-        # 忽略警告拦截，先尝试并发编译，失败则单线程打印完整 Log
         make package/splix/compile EXTRA_CFLAGS="-Wno-error" EXTRA_CXXFLAGS="-Wno-error" -j$(nproc) || \
         make package/splix/compile EXTRA_CFLAGS="-Wno-error" EXTRA_CXXFLAGS="-Wno-error" -j1 V=s
 
@@ -115,7 +109,7 @@ EOF
     - name: Upload IPK artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: splix-ipk-mt7621
+        name: splix-and-depends-ipk-mt7621
         path: |
           openwrt-sdk/bin/packages/**/*.ipk
           openwrt-sdk/bin/targets/**/*.ipk
