@@ -1,0 +1,75 @@
+Name: Build Printing Packages (MT7621 SDK)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd
+
+    - name: Download and extract SDK
+      run: |
+        wget -q https://downloads.openwrt.org/releases/24.10.5/targets/ramips/mt7621/openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+        tar -xf openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+        mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
+
+    - name: Configure feeds and target
+      run: |
+        cd openwrt-sdk
+        cp feeds.conf.default feeds.conf
+        # 换成新的第三方仓库源
+        echo "src-git printing https://github.com/master-0123/openwrt-printing-packages.git" >> feeds.conf
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a -p printing
+
+        # 基础架构配置
+        cat > .config <<'EOF'
+        CONFIG_TARGET_ramips=y
+        CONFIG_TARGET_ramips_mt7621=y
+        CONFIG_TARGET_ramips_mt7621_Generic=y
+        EOF
+
+        # 1. 展开默认配置
+        make defconfig >/dev/null
+        # 2. 将 printing 软件源引入的所有包，自动在 .config 里设为编译为模块 (=m)
+        for pkg in $(ls package/feeds/printing 2>/dev/null); do
+          echo "CONFIG_PACKAGE_$pkg=m" >> .config
+        done
+        # 3. 再次补齐依赖
+        make defconfig >/dev/null
+
+    - name: Show printing feed packages
+      run: |
+        cd openwrt-sdk
+        echo "=== Printing feed packages ==="
+        ls -1 package/feeds/printing
+
+    - name: Build printing packages
+      run: |
+        cd openwrt-sdk
+        echo "=== Start building printing packages ==="
+        # 使用 SDK 机制直接编译 package/feeds/printing 目录下所有设为 =m 的包
+        # 结尾加 || true，保证个别包如果编译失败也不会直接打断 workflow，尽量把能编译好的 IPK 都产出
+        make package/feeds/printing/compile -j$(nproc) || true
+        echo "=== Build finished ==="
+
+    - name: List generated IPK files
+      run: |
+        cd openwrt-sdk
+        echo "=== Printing IPK files ==="
+        find bin/packages -type f -name "*.ipk"
+
+    - name: Upload all IPK artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: all-ipk
+        path: openwrt-sdk/bin/packages/**/*.ipk
