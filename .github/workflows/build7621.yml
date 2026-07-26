@@ -1,4 +1,4 @@
-Name: Build Printing Packages (MT7621 SDK)
+name: Build Printing Packages (MT7621 SDK)
 
 on:
   workflow_dispatch:
