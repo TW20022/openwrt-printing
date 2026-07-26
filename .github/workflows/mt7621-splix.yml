@@ -24,11 +24,11 @@ jobs:
         mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
         rm -f *.zst
 
-    - name: Configure feeds and install base libraries
+    - name: Update feeds and install base libraries
       run: |
         cd openwrt-sdk
         ./scripts/feeds update -a
-        ./scripts/feeds install libcups libstdcpp zlib libjpeg-turbo jbigkit libjbigkit
+        ./scripts/feeds install libcups libstdcpp zlib libjpeg-turbo jbigkit
 
     - name: Inject Custom SpliX Package
       run: |
@@ -41,8 +41,8 @@ jobs:
         PKG_RELEASE:=1
 
         PKG_SOURCE_PROTO:=git
-        PKG_SOURCE_URL:=https://github.com/mdeweerd/splix.git
-        PKG_SOURCE_VERSION:=v$(PKG_VERSION)
+        PKG_SOURCE_URL:=https://github.com/OpenPrinting/splix.git
+        PKG_SOURCE_VERSION:=master
         PKG_MIRROR_HASH:=skip
 
         PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
@@ -54,8 +54,8 @@ jobs:
           CATEGORY:=Utilities
           SUBMENU:=Printing
           TITLE:=Samsung/Xerox SPL printer driver for CUPS
-          DEPENDS:=+libcups +libstdcpp +zlib +libjpeg +libjbigkit
-          URL:=https://github.com/mdeweerd/splix
+          DEPENDS:=+libcups +libstdcpp +zlib +libjpeg +jbigkit
+          URL:=https://github.com/OpenPrinting/splix
         endef
 
         define Package/splix/description
@@ -84,10 +84,10 @@ jobs:
         cat > .config <<'EOF'
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
-        CONFIG_TARGET_ramips_mt7621_DEVICE_sanji_ra-x3000qy=y
+        CONFIG_TARGET_ramips_mt7621_Generic=y
         CONFIG_PACKAGE_libcups=y
         CONFIG_PACKAGE_libstdcpp=y
-        CONFIG_PACKAGE_libjbigkit=y
+        CONFIG_PACKAGE_jbigkit=y
         CONFIG_PACKAGE_splix=y
         EOF
         make defconfig >/dev/null
