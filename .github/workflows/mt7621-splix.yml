@@ -27,9 +27,6 @@ jobs:
     - name: Configure feeds and install base libraries
       run: |
         cd openwrt-sdk
-        cp feeds.conf.default feeds.conf
-        echo "src-git packages https://git.openwrt.org/feed/packages.git" >> feeds.conf
-
         ./scripts/feeds update -a
         ./scripts/feeds install libcups libstdcpp zlib libjpeg-turbo jbigkit libjbigkit
 
