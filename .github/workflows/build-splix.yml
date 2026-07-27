@@ -3,8 +3,8 @@ name: Build SpliX Driver Only
 on:
   workflow_dispatch:
   push:
-    branches:
-      - main
+    paths:
+      - '.github/workflows/build-splix.yml'
 
 jobs:
   build-splix:
@@ -27,7 +27,7 @@ jobs:
         mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
         rm -f *.zst
 
-    - name: Configure feeds, target and fix Makefile attributes
+    - name: Configure feeds and target
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
@@ -35,12 +35,6 @@ jobs:
 
         ./scripts/feeds update -a
         ./scripts/feeds install -a -p printing
-
-        # 修复 splix 的 ppd 安装脚本，忽略缺失的 PPD 文件报错
-        PPD_MAKEFILE="feeds/printing/splix/ppd/Makefile"
-        if [ -f "$PPD_MAKEFILE" ]; then
-          sed -i 's/\tinstall -m 644/\t-install -m 644/g' "$PPD_MAKEFILE" || true
-        fi
 
         cat > .config <<'EOF'
         CONFIG_TARGET_ramips=y
@@ -55,18 +49,16 @@ jobs:
 
         make defconfig
 
-    - name: Compile SpliX with Environment
+    - name: Compile SpliX with Environment (Debug Mode, Single Thread)
       run: |
         cd openwrt-sdk
         
-        # 导出交叉编译的 pkg-config 路径
         export STAGING_DIR="$(pwd)/staging_dir/target-mipsel_24kc_musl"
         export PKG_CONFIG_PATH="$STAGING_DIR/usr/lib/pkgconfig:$STAGING_DIR/usr/share/pkgconfig"
         export PKG_CONFIG_SYSROOT_DIR="$STAGING_DIR"
 
-        # 优先编译底层依赖 cups，然后编译 splix
-        make package/feeds/printing/cups/compile -j$(nproc) || true
-        make package/feeds/printing/splix/compile V=s -j$(nproc)
+        make package/feeds/printing/cups/compile -j1 || true
+        make package/feeds/printing/splix/compile V=s -j1
 
     - name: Upload SpliX IPK Artifact
       uses: actions/upload-artifact@v4
