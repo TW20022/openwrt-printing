@@ -1,10 +1,10 @@
-name: Build SpliX (MT7621 SDK)
+name: Build Splix Package (MT7621 SDK)
 
 on:
   workflow_dispatch:
 
 jobs:
-  build-splix:
+  build:
     runs-on: ubuntu-latest
 
     steps:
@@ -15,7 +15,9 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd \
-          libcups2-dev libjpeg-dev zlib1g-dev pkg-config
+          libcups2-dev libfontconfig1-dev libjpeg-dev libpng-dev zlib1g-dev liblcms2-dev libtiff-dev libfreetype6-dev \
+          enscript bc dc poppler-utils \
+          libpaper-dev pkg-config perl
 
     - name: Download and extract SDK
       run: |
@@ -24,93 +26,71 @@ jobs:
         mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
         rm -f *.zst
 
-    - name: Update feeds and install base libraries
+    - name: Configure feeds and target
       run: |
         cd openwrt-sdk
+        cp feeds.conf.default feeds.conf
+        # 1. 更新为你 Fork 后的新仓库地址
+        echo "src-git printing https://github.com/TW20022/openwrt-printing-packages.git" >> feeds.conf
+
         ./scripts/feeds update -a
-        ./scripts/feeds install libcups libstdcpp zlib libjpeg-turbo
+        ./scripts/feeds install -a -p printing
 
-    - name: Inject Custom SpliX Package
-      run: |
-        mkdir -p openwrt-sdk/package/splix
-        cat << 'EOF' > openwrt-sdk/package/splix/Makefile
-        include $(TOPDIR)/rules.mk
-
-        PKG_NAME:=splix
-        PKG_VERSION:=2.0.0
-        PKG_RELEASE:=1
-
-        PKG_SOURCE_PROTO:=git
-        PKG_SOURCE_URL:=https://github.com/OpenPrinting/splix.git
-        PKG_SOURCE_VERSION:=master
-        PKG_MIRROR_HASH:=skip
-
-        PKG_BUILD_DIR:=$(BUILD_DIR)/$(PKG_NAME)-$(PKG_VERSION)
-
-        include $(INCLUDE_DIR)/package.mk
-
-        define Package/splix
-          SECTION:=utils
-          Category:=Utilities
-          SUBMENU:=Printing
-          TITLE:=Samsung/Xerox SPL printer driver for CUPS
-          DEPENDS:=+libcups +libstdcpp +zlib +libjpeg
-          URL:=https://github.com/OpenPrinting/splix
-        endef
-
-        define Package/splix/description
-          SpliX is a set of CUPS drivers for SPL (Samsung Printer Language) printers.
-          It provides rastertoqpdl filter for Samsung ML/CLP/SCX series printers.
-        endef
-
-        # 核心修复：传入正确链接参数与 pkg-config 环境变量
-        MAKE_FLAGS += \
-        	CUPSCONFIG="$(STAGING_DIR)/usr/bin/cups-config" \
-        	PKG_CONFIG="$(STAGING_DIR_HOST)/bin/pkg-config" \
-        	DISABLE_JBIG=1 \
-        	OPTIM_CFLAGS="$(TARGET_CFLAGS) -Wno-error" \
-        	OPTIM_CXXFLAGS="$(TARGET_CXXFLAGS) -Wno-error -std=gnu++11" \
-        	LDFLAGS="$(TARGET_LDFLAGS) -lcups -lstdc++ -lz -ljpeg"
-
-        define Package/splix/install
-        	$(INSTALL_DIR) $(1)/usr/lib/cups/filter
-        	$(INSTALL_BIN) $(PKG_BUILD_DIR)/splix/optimized/rastertoqpdl $(1)/usr/lib/cups/filter/
-        	$(INSTALL_DIR) $(1)/usr/share/cups/model
-        	$(CP) $(PKG_BUILD_DIR)/splix/ppd/* $(1)/usr/share/cups/model/ 2>/dev/null || true
-        endef
-
-        $(eval $(call BuildPackage,splix))
-        EOF
-
-    - name: Configure target
-      run: |
-        cd openwrt-sdk
+        # 仅选中 RAX3000QY (MT7621) 架构及 splix
         cat > .config <<'EOF'
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
-        CONFIG_TARGET_ramips_mt7621_Generic=y
-        CONFIG_PACKAGE_libcups=y
-        CONFIG_PACKAGE_libstdcpp=y
+        CONFIG_TARGET_ramips_mt7621_DEVICE_sanji_ra-x3000qy=y
         CONFIG_PACKAGE_splix=y
         EOF
-        make defconfig >/dev/null
 
-    - name: Build SpliX package
+        # 自动补全 splix 所需的所有依赖配置 (+libcups, +libjbigkit, +libpng 等)
+        make defconfig
+
+    - name: Apply Compatibility Fixes
       run: |
         cd openwrt-sdk
-        make package/splix/compile EXTRA_CFLAGS="-Wno-error" EXTRA_CXXFLAGS="-Wno-error" -j$(nproc) || \
-        make package/splix/compile EXTRA_CFLAGS="-Wno-error" EXTRA_CXXFLAGS="-Wno-error" -j1 V=s
+        # 1. 软链接兼容性修复
+        mkdir -p staging_dir build_dir
+        REAL_TARGET_STAGING=$(ls -d staging_dir/target-mipsel_* 2>/dev/null | head -n 1)
+        REAL_TARGET_BUILD=$(ls -d build_dir/target-mipsel_* 2>/dev/null | head -n 1)
+        
+        if [ -n "$REAL_TARGET_STAGING" ]; then
+          mkdir -p "$REAL_TARGET_STAGING/usr/lib" "$REAL_TARGET_STAGING/usr/include"
+          [ ! -e staging_dir/target-mipsel_24kc_musl ] && ln -sf $(basename "$REAL_TARGET_STAGING") staging_dir/target-mipsel_24kc_musl
+        fi
+        if [ -n "$REAL_TARGET_BUILD" ]; then
+          [ ! -e build_dir/target-mipsel_24kc_musl ] && ln -sf $(basename "$REAL_TARGET_BUILD") build_dir/target-mipsel_24kc_musl
+        fi
+
+        # 2. 修复 libjbigkit 在 GCC 13 下的 -ansi/-pedantic 严格模式问题
+        if [ -d "package/feeds/printing/libjbigkit" ]; then
+          echo "Applying fix for libjbigkit C flags..."
+          find package/feeds/printing/libjbigkit/ -type f \( -name "Makefile" -o -name "*.patch" \) -exec sed -i 's/-ansi//g; s/-pedantic//g' {} + || true
+        fi
+
+    - name: Build splix and its dependencies
+      run: |
+        cd openwrt-sdk
+        echo "=== Start building splix ==="
+
+        # 先优先编译底层依赖 libjbigkit
+        make package/feeds/printing/libjbigkit/compile V=s BUILD_KEY=1 || true
+
+        # 编译 splix（SDK 会自动处理其余的 cups/png 等基础库）
+        make package/feeds/printing/splix/compile V=s BUILD_KEY=1 -j1
 
     - name: List generated IPK files
       run: |
         cd openwrt-sdk
-        find bin/packages -type f -name "*.ipk" | sort
+        echo "=== Generated IPK List ==="
+        find bin/ -type f -name "*.ipk" | sort
 
     - name: Upload IPK artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: splix-and-depends-ipk-mt7621
+        name: splix-ipk-mt7621
         path: |
-          openwrt-sdk/bin/packages/**/*.ipk
-          openwrt-sdk/bin/targets/**/*.ipk
+          openwrt-sdk/bin/packages/**/splix*.ipk
+          openwrt-sdk/bin/packages/**/libjbig*.ipk
         if-no-files-found: warn
