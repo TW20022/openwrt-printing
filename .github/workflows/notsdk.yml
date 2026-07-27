@@ -18,8 +18,16 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y build-ready g++ libncurses5-dev zlib1g-dev gawk \
-            git gettext libssl-dev xsltproc wget unzip python3 python3-pyelftools file
+          sudo apt-get install -y \
+            build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd \
+            libncurses5-dev libncursesw5-dev \
+            zlib1g-dev gettext libssl-dev xsltproc rsync bc groff dc \
+            libcups2-dev libcupsimage2-dev \
+            libjpeg-dev libpng-dev libtiff-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            liblcms2-dev libjbig-dev \
+            libtool automake autoconf perl pkg-config \
+            enscript poppler-utils libpaper-dev
           sudo apt-get autoremove --purge -y
           sudo apt-get clean
 
@@ -38,20 +46,17 @@ jobs:
         run: |
           cd openwrt-source
           
-          # 1. 加载默认配置（以 mt7621 为例，可按需修改 target）
+          # 1. 加载默认配置
           make defconfig
           
-          # 2. 修改 .config：设置目标平台为 ramips/mt7621（按你的实际硬件调整）
+          # 2. 设置目标平台为 ramips/mt7621
           sed -i 's/CONFIG_TARGET_ramips=y/CONFIG_TARGET_ramips=y/' .config
           sed -i 's/CONFIG_TARGET_ramips_mt7621=y/CONFIG_TARGET_ramips_mt7621=y/' .config
           
-          # 3. 禁用不需要的固件生成（仅编译包，不打包固件，节省时间）
+          # 3. 仅编译包，不打包完整固件
           echo "CONFIG_TARGET_ROOTFS_TARGZ=y" >> .config
-          # 如果不想编译内核固件等大头，可以按需调整，但 Buildroot 模式下编译 printing 依赖基础组件是自动的
           
-          # 4. 启用你需要的 printing 相关包（确保被选中编译为 ipk）
-          # 假设你的 printing 源里有 cups, gutenprint 等，可以通过ci自动开启或确保它们在 defconfig 中选中
-          # 这里把 printing feed 下的所有包在配置中设为 m (module)
+          # 4. 自动启用 printing 源下的所有包为模块 (m)
           for pkg in $(ls package/feeds/printing); do
             echo "CONFIG_PACKAGE_$pkg=m" >> .config
           done
@@ -64,8 +69,7 @@ jobs:
           JOBS=$(nproc)
           echo ">>> Using parallel jobs: $JOBS"
           
-          # 日志设置只显示错误 (V=s2 或 V=e，OpenWrt 中 V=s 显示详细，V=e 或默认精简只看错误。若需极简报错用 V=e)
-          # 只编译 package 目录下的 printing 相关包及其依赖，不生成整机固件
+          # 使用 V=e 模式，日志平时只输出错误，保持干净
           make package/compile V=e -j$JOBS || make package/compile V=e -j1
 
       - name: Collect IPK Artifacts
