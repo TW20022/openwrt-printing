@@ -1,0 +1,63 @@
+name: Build foo2zjs
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-foo2zjs.yml'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev \
+          zlib1g-dev gawk git gettext libssl-dev xsltproc rsync wget unzip python3 bc groff dc
+
+    - name: Download and extract SDK
+      run: |
+        wget -q https://downloads.openwrt.org/releases/24.10.5/targets/ramips/mt7621/openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+        tar -xf openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+        mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
+        rm -f *.zst
+
+    - name: Configure feeds and target
+      run: |
+        cd openwrt-sdk
+        cp feeds.conf.default feeds.conf
+        echo "src-git printing https://github.com/TW20022/openwrt-printing-packages.git" >> feeds.conf
+
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a -p printing
+
+        cat > .config <<'EOF'
+        CONFIG_TARGET_ramips=y
+        CONFIG_TARGET_ramips_mt7621=y
+        CONFIG_PACKAGE_cups=y
+        CONFIG_PACKAGE_libcups=y
+        CONFIG_PACKAGE_libjbigkit=y
+        CONFIG_PACKAGE_foo2zjs=y
+        EOF
+
+        make defconfig
+
+    - name: Compile foo2zjs
+      run: |
+        cd openwrt-sdk
+        export STAGING_DIR="$(pwd)/staging_dir/target-mipsel_24kc_musl"
+        export PKG_CONFIG_PATH="$STAGING_DIR/usr/lib/pkgconfig:$STAGING_DIR/usr/share/pkgconfig"
+        export PKG_CONFIG_SYSROOT_DIR="$STAGING_DIR"
+
+        make package/feeds/printing/cups/compile -j1 || true
+        make package/feeds/printing/foo2zjs/compile V=s -j1
+
+    - name: Upload Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ipk-foo2zjs
+        path: openwrt-sdk/bin/packages/mipsel_24kc/printing/*.ipk
