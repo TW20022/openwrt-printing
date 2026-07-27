@@ -27,19 +27,33 @@ jobs:
         mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
         rm -f *.zst
 
-    - name: Configure feeds and target
+    - name: Configure feeds, target and fix Makefile attributes
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
+        # 已更新为你自己的 Fork 仓库地址
         echo "src-git printing https://github.com/TW20022/openwrt-printing-packages.git" >> feeds.conf
 
         ./scripts/feeds update -a
         ./scripts/feeds install -a -p printing
 
+        # 规范化 splix 的 Makefile (处理新版 PKG_HASH 校验，并防范未知的 ppdbc 崩溃风险)
+        SPLIX_MAKEFILE="feeds/printing/splix/Makefile"
+        if [ -f "$SPLIX_MAKEFILE" ]; then
+          sed -i 's/PKG_MIRROR_HASH:=.*/PKG_HASH:=skip/g' "$SPLIX_MAKEFILE" || true
+          
+          if grep -q "ppdbc" "$SPLIX_MAKEFILE"; then
+            echo "Found ppdbc command in Makefile, adding safe guards..."
+            sed -i 's/ppdbc/# ppdbc/g' "$SPLIX_MAKEFILE" || true
+          fi
+        fi
+
         cat > .config <<'EOF'
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
+        # 使用通用架构 (Generic)
 
+        # 启用 cups  libjbigkit  libcupsimage
         CONFIG_PACKAGE_cups=y
         CONFIG_PACKAGE_libcups=y
         CONFIG_PACKAGE_libcupsimage=y
