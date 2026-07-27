@@ -70,7 +70,7 @@ jobs:
           set -e
           cd openwrt-sdk
 
-          make package/feeds/printing/compile V=s -j1
+          make V=s -j1
 
       - name: Upload IPK Artifacts
         uses: actions/upload-artifact@v4
