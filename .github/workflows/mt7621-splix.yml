@@ -31,7 +31,7 @@ jobs:
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
-        echo "src-git printing https://github.com/master-0123/openwrt-printing-packages.git" >> feeds.conf
+        echo "src-git printing https://github.com/TW20022/openwrt-printing-packages.git" >> feeds.conf
 
         ./scripts/feeds update -a
         ./scripts/feeds install -a -p printing
