@@ -18,7 +18,6 @@ jobs:
         with:
           path: |
             openwrt-sdk/dl
-            openwrt-sdk/staging_dir
             openwrt-sdk/build_dir
             ~/.openwrt-feeds
           key: ${{ runner.os }}-openwrt-build-mt7621-${{ hashFiles('feeds.conf') }}
