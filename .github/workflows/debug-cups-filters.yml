@@ -1,0 +1,89 @@
+name: Debug CUPS Filters & Printing Packages
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev \
+          zlib1g-dev gawk git gettext libssl-dev xsltproc rsync wget unzip python3
+
+    - name: Download and extract SDK
+      run: |
+        wget -q https://downloads.openwrt.org/releases/24.10.5/targets/ramips/mt7621/openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+        tar -xf openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+        mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
+        rm -f *.zst
+
+    - name: Configure feeds and target
+      run: |
+        cd openwrt-sdk
+        cp feeds.conf.default feeds.conf
+        echo "src-git printing https://github.com/master-0123/openwrt-printing-packages.git" >> feeds.conf
+
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a -p printing
+
+        cat > .config <<'EOF'
+        CONFIG_TARGET_ramips=y
+        CONFIG_TARGET_ramips_mt7621=y
+        CONFIG_TARGET_ramips_mt7621_Generic=y
+
+        # 1. 显式启用核心底座与依赖库 (解决 foo2zjs / foo2zjs-extra 编译丢失依赖问题)
+        CONFIG_PACKAGE_cups=y
+        CONFIG_PACKAGE_libcups=y
+        CONFIG_PACKAGE_libcupsfilters=y
+        CONFIG_PACKAGE_openprinting-cups-filters=y
+
+        # 2. 启用目标编译包
+        CONFIG_PACKAGE_foo2zjs=y
+        CONFIG_PACKAGE_foo2zjs-extra=y
+        CONFIG_PACKAGE_gutenprint=y
+        EOF
+
+        make defconfig
+
+    - name: Pre-build Dependencies & Fix Gutenprint Host Tools
+      run: |
+        cd openwrt-sdk
+
+        # 1. 先进行 gutenprint hostpkg 工具的编译准备
+        make package/feeds/printing/gutenprint/host-compile -j$(nproc) || true
+        
+        HOST_EXTRACT="$(find build_dir/hostpkg/ -name extract-strings -type f 2>/dev/null | head -n 1)"
+        if [ -n "$HOST_EXTRACT" ]; then
+          echo "Found host extract-strings at $HOST_EXTRACT, fixing path..."
+          mkdir -p staging_dir/host/bin/
+          cp -f "$HOST_EXTRACT" staging_dir/host/bin/gutenprint-extract-strings
+          chmod +x staging_dir/host/bin/gutenprint-extract-strings
+          
+          mkdir -p build_dir/target-mipsel_24kc_musl/gutenprint-5.3.5-pre1/src/xml/
+          ln -sf $(pwd)/staging_dir/host/bin/gutenprint-extract-strings build_dir/target-mipsel_24kc_musl/gutenprint-5.3.5-pre1/src/xml/extract-strings 2>/dev/null || true
+        fi
+
+    - name: Compile Target Packages with Debug Logs
+      run: |
+        cd openwrt-sdk
+        
+        # 2. 将 openprinting-cups-filters 也纳入单线程 V=s 排错，一旦报错立即中断并打印完整日志
+        make package/feeds/printing/openprinting-cups-filters/compile V=s -j1
+        
+        # 3. 接着编译后续包
+        make package/feeds/printing/foo2zjs/compile V=s -j1
+        make package/feeds/printing/gutenprint/compile V=s -j1
+
+    - name: Upload IPKs
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: mt7621-printing-ipks
+        path: openwrt-sdk/bin/packages/mipsel_24kc/printing/*.ipk
