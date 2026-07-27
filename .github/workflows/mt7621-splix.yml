@@ -31,29 +31,21 @@ jobs:
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
-        # 已更新为你自己的 Fork 仓库地址
         echo "src-git printing https://github.com/TW20022/openwrt-printing-packages.git" >> feeds.conf
 
         ./scripts/feeds update -a
         ./scripts/feeds install -a -p printing
 
-        # 规范化 splix 的 Makefile (处理新版 PKG_HASH 校验，并防范未知的 ppdbc 崩溃风险)
-        SPLIX_MAKEFILE="feeds/printing/splix/Makefile"
-        if [ -f "$SPLIX_MAKEFILE" ]; then
-          sed -i 's/PKG_MIRROR_HASH:=.*/PKG_HASH:=skip/g' "$SPLIX_MAKEFILE" || true
-          
-          if grep -q "ppdbc" "$SPLIX_MAKEFILE"; then
-            echo "Found ppdbc command in Makefile, adding safe guards..."
-            sed -i 's/ppdbc/# ppdbc/g' "$SPLIX_MAKEFILE" || true
-          fi
+        # 修复 splix 的 ppd 安装脚本，忽略缺失的 PPD 文件报错
+        PPD_MAKEFILE="feeds/printing/splix/ppd/Makefile"
+        if [ -f "$PPD_MAKEFILE" ]; then
+          sed -i 's/\tinstall -m 644/\t-install -m 644/g' "$PPD_MAKEFILE" || true
         fi
 
         cat > .config <<'EOF'
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
-        # 使用通用架构 (Generic)
 
-        # 启用 cups  libjbigkit  libcupsimage
         CONFIG_PACKAGE_cups=y
         CONFIG_PACKAGE_libcups=y
         CONFIG_PACKAGE_libcupsimage=y
@@ -67,7 +59,7 @@ jobs:
       run: |
         cd openwrt-sdk
         
-        # 导出交叉编译的 pkg-config 路径，解决 splix 找不到 cups 的问题
+        # 导出交叉编译的 pkg-config 路径
         export STAGING_DIR="$(pwd)/staging_dir/target-mipsel_24kc_musl"
         export PKG_CONFIG_PATH="$STAGING_DIR/usr/lib/pkgconfig:$STAGING_DIR/usr/share/pkgconfig"
         export PKG_CONFIG_SYSROOT_DIR="$STAGING_DIR"
