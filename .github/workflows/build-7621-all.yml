@@ -1,0 +1,180 @@
+name: Build OpenWrt Printing Packages MT7621 all
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Cache OpenWrt SDK and Build Artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            openwrt-sdk/dl
+            openwrt-sdk/staging_dir
+            openwrt-sdk/build_dir
+            ~/.openwrt-feeds
+          key: ${{ runner.os }}-openwrt-build-mt7621-${{ hashFiles('feeds.conf') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-build-mt7621-
+
+      - name: Install Host Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd \
+            libncurses5-dev libncursesw5-dev \
+            zlib1g-dev gettext libssl-dev xsltproc rsync bc groff dc \
+            libcups2-dev libcupsimage2-dev \
+            libjpeg-dev libpng-dev libtiff-dev \
+            libfontconfig1-dev libfreetype6-dev \
+            liblcms2-dev libjbig-dev \
+            libtool automake autoconf perl pkg-config \
+            enscript poppler-utils libpaper-dev
+
+      - name: Download and extract SDK
+        # 如果缓存命中了 openwrt-sdk 目录，则跳过下载解压
+        run: |
+          if [ -d "openwrt-sdk" ] && [ -f "openwrt-sdk/Makefile" ]; then
+            echo "SDK already exists from cache."
+          else
+            wget -q https://downloads.openwrt.org/releases/24.10.5/targets/ramips/mt7621/openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            tar -xf openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
+            rm -rf openwrt-sdk
+            mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
+            rm -f *.zst
+          fi
+
+      - name: Configure feeds and target
+        run: |
+          cd openwrt-sdk
+          cp feeds.conf.default feeds.conf
+          echo "src-git printing https://github.com/TW20022/openwrt-printing-packages.git" >> feeds.conf
+
+          ./scripts/feeds update -a
+
+          # 剔除 printing feed 中与官方冲突的基础底层库目录
+          rm -rf feeds/printing/cairo || true
+          rm -rf feeds/printing/libpng || true
+          rm -rf feeds/printing/libjpeg-turbo || true
+          rm -rf feeds/printing/zlib || true
+          rm -rf feeds/printing/lcms2 || true
+
+          ./scripts/feeds install -a
+
+          cat > .config <<'EOF'
+          CONFIG_TARGET_ramips=y
+          CONFIG_TARGET_ramips_mt7621=y
+
+          CONFIG_PACKAGE_cairo=y
+          CONFIG_PACKAGE_lcms2=y
+          CONFIG_PACKAGE_libjbigkit=y
+          CONFIG_PACKAGE_libpng=y
+          CONFIG_PACKAGE_libjpeg-turbo=y
+          CONFIG_PACKAGE_zlib=y
+
+          CONFIG_PACKAGE_cups=y
+          CONFIG_PACKAGE_libcups=y
+          CONFIG_PACKAGE_libcupsimage=y
+          CONFIG_PACKAGE_libppd=y
+          CONFIG_PACKAGE_libcupsfilters=y
+
+          CONFIG_PACKAGE_poppler=y
+          CONFIG_PACKAGE_qpdf=y
+
+          CONFIG_PACKAGE_ghostscript=y
+          CONFIG_PACKAGE_ghostscript-fonts-std=y
+
+          CONFIG_PACKAGE_foomatic-filters=y
+          CONFIG_PACKAGE_openprinting-cups-filters=y
+
+          CONFIG_PACKAGE_gutenprint=y
+          CONFIG_PACKAGE_splix=y
+          CONFIG_PACKAGE_foo2zjs=y
+          CONFIG_PACKAGE_foo2zjs-extra=y
+          EOF
+
+          make defconfig
+
+      - name: Apply Compatibility Fixes
+        run: |
+          cd openwrt-sdk
+          # libjbigkit: 去掉 -ansi/-pedantic
+          if [ -d "package/feeds/printing/libjbigkit" ]; then
+            find package/feeds/printing/libjbigkit/ -type f -name "Makefile" -exec sed -i 's/-ansi//g; s/-pedantic//g' {} +
+          fi
+          # Ghostscript: GCC13 容错
+          if [ -d "package/feeds/printing/ghostscript" ]; then
+            sed -i 's/HOST_CONFIGURE_ARGS:=/HOST_CONFIGURE_ARGS:= HOST_CFLAGS="-Wno-error -Wno-implicit-function-declaration" /g' package/feeds/printing/ghostscript/Makefile
+          fi
+          # foomatic-filters: 注入 TEXTTOPS
+          if [ -d "package/feeds/printing/foomatic-filters" ]; then
+            sed -i 's/CONFIGURE_ARGS+=/CONFIGURE_ARGS+= TEXTTOPS=\/usr\/bin\/enscript /g' package/feeds/printing/foomatic-filters/Makefile
+          fi
+          # gutenprint: malloc/realloc 检测补丁
+          if [ -d "package/feeds/printing/gutenprint" ]; then
+            sed -i 's/CONFIGURE_ARGS+=/CONFIGURE_ARGS+= ac_cv_func_malloc_0_nonnull=yes ac_cv_func_realloc_0_nonnull=yes /g' package/feeds/printing/gutenprint/Makefile
+          fi
+
+      - name: Build Printing Packages with Multi-core & Fallback Retry
+        run: |
+          set -e
+          cd openwrt-sdk
+          SUCCESS_LIST=""
+          FAILED_LIST=""
+          
+          mkdir -p ../failed_logs
+
+          # 自动获取当前 runner 的最大可用核心数（ubuntu-22.04 通常是 2 或 4 核）
+          JOBS=$(nproc)
+          echo ">>> Using max parallel jobs: $JOBS"
+
+          for pkg in cairo lcms2 libjbigkit libpng libjpeg-turbo cups libcups libcupsimage libppd libcupsfilters poppler qpdf ghostscript ghostscript-fonts-std foomatic-filters openprinting-cups-filters gutenprint splix foo2zjs foo2zjs-extra; do
+            echo ">>> [Attempt 1] Building $pkg with multi-core (-j$JOBS) ..."
+            
+            # 1. 优先尝试多核并行编译
+            if make package/$pkg/compile V=s -j$JOBS; then
+              SUCCESS_LIST="$SUCCESS_LIST $pkg"
+            else
+              echo "!!! [Attempt 1 Failed] $pkg failed with -j$JOBS. Cleaning and retrying with single-thread (-j1)..."
+              
+              # 2. 清理失败现场
+              make package/$pkg/clean || true
+              
+              # 3. 降级到单线程（-j1）重试（很多并行下由于 Makefile 依赖漏写导致的竞态条件，在单线程下能顺利通过）
+              if make package/$pkg/compile V=s -j1; then
+                echo ">>> [Attempt 2 Success] $pkg built successfully on single-thread fallback."
+                SUCCESS_LIST="$SUCCESS_LIST $pkg"
+              else
+                echo "!!! [Final Failure] $pkg failed even with single-thread."
+                FAILED_LIST="$FAILED_LIST $pkg"
+                mkdir -p ../failed_logs/$pkg
+                cp -r build_dir/target-*/$pkg-* ../failed_logs/$pkg/ 2>/dev/null || true
+              fi
+            fi
+          done
+
+          echo "=== Build Summary ==="
+          echo "Success: $SUCCESS_LIST"
+          echo "Failed: $FAILED_LIST"
+
+      - name: Upload IPK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-printing-packages
+          path: openwrt-sdk/bin/packages/**/*.ipk
+
+      - name: Upload Failed Logs
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: printing-failed-logs
+          path: failed_logs/**
+          if-no-files-found: ignore
