@@ -127,16 +127,19 @@ jobs:
           JOBS=$(nproc)
           echo ">>> Using max parallel jobs: $JOBS"
           
-          # 更新feeds并生成配置
-          ./scripts/feeds update -a
+          # 1. 只强制更新自定义的 printing feed，避免官方 base 产生 git detached pull 冲突
+          echo ">>> Updating printing feed..."
+          ./scripts/feeds update printing
+          
+          # 2. 安装 feeds（确保 printing 中的包链接到 package 目录）
           ./scripts/feeds install -a
           
-          # 核心：在 SDK 中，通过编译 package/compile 目标，它会自动根据勾选的配置（.config）增量构建所有已选中的包，而不会去寻找 target/linux
+          # 3. 在 SDK 环境下并行编译所有已选中的 printing/应用包
           if make package/compile V=s -j$JOBS; then
             echo ">>> All packages built successfully!"
           else
             echo "!!! Multi-core build failed, retrying with single-thread (-j1)..."
-            make package/compile V=sc -j1
+            make package/compile V=s -j1
           fi
 
       - name: Upload IPK Artifacts
