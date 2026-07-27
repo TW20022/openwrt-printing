@@ -120,23 +120,18 @@ jobs:
           if [ -d "package/feeds/printing/gutenprint" ]; then
             sed -i 's/CONFIGURE_ARGS+=/CONFIGURE_ARGS+= ac_cv_func_malloc_0_nonnull=yes ac_cv_func_realloc_0_nonnull=yes /g' package/feeds/printing/gutenprint/Makefile
           fi
-      - name: Clean Kernel Build Artifacts
-        run: |
-          cd openwrt-sdk
-          rm -rf build_dir/target-mipsel_24kc_musl/linux-ramips_mt7621/linux-*
-          rm -rf build_dir/target-mipsel_24kc_musl/linux-ramips_mt7621/packages/.pkgdir/kernel*
-
-      - name: Build All Configured Packages (Global World Make)
+      - name: Clean Kernel Residuals and Build
         run: |
           cd openwrt-sdk
           JOBS=$(nproc)
           echo ">>> Using max parallel jobs: $JOBS"
           
-          # 1. 优先单独编译内核和基础系统，确保 modules.builtin 等核心文件生成
-          echo ">>> Pre-compiling kernel and target dependencies..."
-          make target/linux/compile V=s -j$JOBS || make target/linux/compile V=s -j1
+          # 1. 彻底清理冲突的内核构建目录，强制让 SDK 忽略它或重新按需生成
+          echo ">>> Cleaning conflicting kernel build dirs..."
+          rm -rf build_dir/target-mipsel_24kc_musl/linux-ramips_mt7621/linux-*
+          rm -rf build_dir/target-mipsel_24kc_musl/linux-ramips_mt7621/packages/.pkgdir/kernel*
           
-          # 2. 正式执行全局编译
+          # 2. 直接执行全局编译
           if make world V=s -j$JOBS; then
             echo ">>> Build completed successfully!"
           else
