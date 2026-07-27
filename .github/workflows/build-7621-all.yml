@@ -120,23 +120,23 @@ jobs:
           if [ -d "package/feeds/printing/gutenprint" ]; then
             sed -i 's/CONFIGURE_ARGS+=/CONFIGURE_ARGS+= ac_cv_func_malloc_0_nonnull=yes ac_cv_func_realloc_0_nonnull=yes /g' package/feeds/printing/gutenprint/Makefile
           fi
-      - name: Clean Kernel Residuals and Build
+          
+      - name: Build Printing Packages in SDK
         run: |
           cd openwrt-sdk
           JOBS=$(nproc)
           echo ">>> Using max parallel jobs: $JOBS"
           
-          # 1. 彻底清理冲突的内核构建目录，强制让 SDK 忽略它或重新按需生成
-          echo ">>> Cleaning conflicting kernel build dirs..."
-          rm -rf build_dir/target-mipsel_24kc_musl/linux-ramips_mt7621/linux-*
-          rm -rf build_dir/target-mipsel_24kc_musl/linux-ramips_mt7621/packages/.pkgdir/kernel*
+          # 更新feeds并生成配置
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
           
-          # 2. 直接执行全局编译
-          if make world V=s -j$JOBS; then
-            echo ">>> Build completed successfully!"
+          # 核心：在 SDK 中，通过编译 package/compile 目标，它会自动根据勾选的配置（.config）增量构建所有已选中的包，而不会去寻找 target/linux
+          if make package/compile V=s -j$JOBS; then
+            echo ">>> All packages built successfully!"
           else
-            echo "!!! Build failed with multi-core, cleaning and retrying with single-thread (-j1)..."
-            make world V=s -j1
+            echo "!!! Multi-core build failed, retrying with single-thread (-j1)..."
+            make package/compile V=sc -j1
           fi
 
       - name: Upload IPK Artifacts
