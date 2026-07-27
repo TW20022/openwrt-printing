@@ -40,20 +40,28 @@ jobs:
         CONFIG_TARGET_ramips_mt7621=y
         CONFIG_PACKAGE_cups=y
         CONFIG_PACKAGE_libcups=y
+        CONFIG_PACKAGE_libcupsimage=y
         CONFIG_PACKAGE_libjbigkit=y
         CONFIG_PACKAGE_foo2zjs=y
         EOF
 
         make defconfig
 
-    - name: Compile foo2zjs
+    - name: Compile foo2zjs with Full Host Dependencies
       run: |
         cd openwrt-sdk
         export STAGING_DIR="$(pwd)/staging_dir/target-mipsel_24kc_musl"
         export PKG_CONFIG_PATH="$STAGING_DIR/usr/lib/pkgconfig:$STAGING_DIR/usr/share/pkgconfig"
         export PKG_CONFIG_SYSROOT_DIR="$STAGING_DIR"
 
+        # 1. 核心改进：预先编译 cups 和 libjbigkit 的 Host/Target 端，
+        # 确保 ghostscript[host] 在配置时能够顺利找到 cups/cups.h
+        make package/feeds/printing/cups/host-compile -j1 || true
         make package/feeds/printing/cups/compile -j1 || true
+        make package/feeds/printing/libjbigkit/host-compile -j1 || true
+        make package/feeds/printing/libjbigkit/compile -j1 || true
+
+        # 2. 单线程、Debug 模式编译 foo2zjs
         make package/feeds/printing/foo2zjs/compile V=s -j1
 
     - name: Upload Artifact
