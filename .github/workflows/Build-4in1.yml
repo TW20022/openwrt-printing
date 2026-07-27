@@ -51,6 +51,17 @@ jobs:
           CONFIG_TARGET_ramips=y
           CONFIG_TARGET_ramips_mt7621=y
           EOF
+
+          echo "CONFIG_PACKAGE_libcups=y" >> .config
+          echo "CONFIG_PACKAGE_libcupsimage=y" >> .config
+          echo "CONFIG_PACKAGE_libjbigkit=y" >> .config
+          echo "CONFIG_PACKAGE_libpng=y" >> .config
+          echo "CONFIG_PACKAGE_libjpeg-turbo=y" >> .config
+          echo "CONFIG_PACKAGE_ghostscript=y" >> .config
+          echo "CONFIG_PACKAGE_openprinting-cups-filters=y" >> .config
+          echo "CONFIG_PACKAGE_gutenprint=y" >> .config
+          echo "CONFIG_PACKAGE_splix=y" >> .config
+          echo "CONFIG_PACKAGE_foo2zjs=y" >> .config
           
           make defconfig
 
@@ -59,20 +70,7 @@ jobs:
           set -e
           cd openwrt-sdk
 
-          echo "=== 1. 编译 host 版依赖 ==="
-          make package/feeds/printing/ghostscript/host-compile V=s -j1
-
-          echo "=== 2. 编译 target 版依赖 ==="
-          make package/feeds/printing/libcups/compile V=s -j1
-          make package/feeds/printing/libcupsimage/compile V=s -j1
-          make package/feeds/printing/libjpeg-turbo/compile V=s -j1
-          make package/feeds/printing/libpng/compile V=s -j1
-
-          echo "=== 3. 编译打印栈 ==="
-          make package/feeds/printing/openprinting-cups-filters/compile V=s -j1
-          make package/feeds/printing/gutenprint/compile V=s -j1
-          make package/feeds/printing/foo2zjs/compile V=s -j1
-          make package/feeds/printing/foo2zjs-extra/compile V=s -j1
+          make package/feeds/printing/compile V=s -j1
 
       - name: Upload IPK Artifacts
         uses: actions/upload-artifact@v4
