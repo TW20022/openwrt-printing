@@ -40,7 +40,6 @@ jobs:
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
 
-        CONFIG_PACKAGE_cups=y
         CONFIG_PACKAGE_libcups=y
         CONFIG_PACKAGE_libcupsimage=y
         CONFIG_PACKAGE_libjbigkit=y
@@ -57,7 +56,9 @@ jobs:
         export PKG_CONFIG_PATH="$STAGING_DIR/usr/lib/pkgconfig:$STAGING_DIR/usr/share/pkgconfig"
         export PKG_CONFIG_SYSROOT_DIR="$STAGING_DIR"
 
-        make package/feeds/printing/cups/compile -j1 || true
+        make package/feeds/printing/libcups/compile V=s -j1
+        make package/feeds/printing/libcupsimage/compile V=s -j1
+        make package/feeds/printing/libjbigkit/compile V=s -j1
         make package/feeds/printing/splix/compile V=s -j1
 
     - name: Upload SpliX IPK Artifact
