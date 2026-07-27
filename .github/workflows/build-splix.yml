@@ -53,7 +53,7 @@ jobs:
         cd openwrt-sdk
         # 直接编译 splix。OpenWrt SDK 的包编译会自动处理好 libcups、libjbigkit 等前置依赖，
         # 不需要手动一行行去 make 每一个底层库。
-        make package/feeds/printing/splix/compile V=s -j1
+        make V=s -j1
 
     - name: Upload SpliX IPK Artifact
       uses: actions/upload-artifact@v4
