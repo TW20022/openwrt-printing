@@ -60,7 +60,6 @@ jobs:
           cd openwrt-sdk
 
           echo "=== 1. 编译 host 版依赖 ==="
-          make package/feeds/printing/libcups/host-compile V=s -j1
           make package/feeds/printing/ghostscript/host-compile V=s -j1
 
           echo "=== 2. 编译 target 版依赖 ==="
