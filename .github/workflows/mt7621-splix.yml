@@ -51,10 +51,9 @@ jobs:
 
         define Package/splix
           SECTION:=utils
-          CATEGORY:=Utilities
+          Category:=Utilities
           SUBMENU:=Printing
           TITLE:=Samsung/Xerox SPL printer driver for CUPS
-          # 移除了不存在的 jbigkit，只保留 OP 官方确切存在的依赖
           DEPENDS:=+libcups +libstdcpp +zlib +libjpeg
           URL:=https://github.com/OpenPrinting/splix
         endef
@@ -64,11 +63,14 @@ jobs:
           It provides rastertoqpdl filter for Samsung ML/CLP/SCX series printers.
         endef
 
+        # 核心修复：传入正确链接参数与 pkg-config 环境变量
         MAKE_FLAGS += \
         	CUPSCONFIG="$(STAGING_DIR)/usr/bin/cups-config" \
+        	PKG_CONFIG="$(STAGING_DIR_HOST)/bin/pkg-config" \
         	DISABLE_JBIG=1 \
         	OPTIM_CFLAGS="$(TARGET_CFLAGS) -Wno-error" \
-        	OPTIM_CXXFLAGS="$(TARGET_CXXFLAGS) -Wno-error -std=gnu++11"
+        	OPTIM_CXXFLAGS="$(TARGET_CXXFLAGS) -Wno-error -std=gnu++11" \
+        	LDFLAGS="$(TARGET_LDFLAGS) -lcups -lstdc++ -lz -ljpeg"
 
         define Package/splix/install
         	$(INSTALL_DIR) $(1)/usr/lib/cups/filter
