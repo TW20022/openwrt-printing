@@ -132,12 +132,15 @@ jobs:
           JOBS=$(nproc)
           echo ">>> Using max parallel jobs: $JOBS"
           
-          # 直接全局编译，确保 .config 中所有选中的包和依赖全部生成
+          # 1. 优先单独编译内核和基础系统，确保 modules.builtin 等核心文件生成
+          echo ">>> Pre-compiling kernel and target dependencies..."
+          make target/linux/compile V=s -j$JOBS || make target/linux/compile V=s -j1
+          
+          # 2. 正式执行全局编译
           if make world V=s -j$JOBS; then
             echo ">>> Build completed successfully!"
           else
             echo "!!! Build failed with multi-core, cleaning and retrying with single-thread (-j1)..."
-            make clean || true
             make world V=s -j1
           fi
 
