@@ -56,10 +56,36 @@ jobs:
           # 3. 仅编译包，不打包完整固件
           echo "CONFIG_TARGET_ROOTFS_TARGZ=y" >> .config
           
-          # 4. 自动启用 printing 源下的所有包为模块 (m)
-          for pkg in $(ls package/feeds/printing); do
-            echo "CONFIG_PACKAGE_$pkg=m" >> .config
-          done
+          # 4. 显式写入所有需要的打印和依赖包配置 (使用 m 模块化编译)
+          cat << 'EOF' >> .config
+          CONFIG_PACKAGE_dbus=m
+          CONFIG_PACKAGE_cairo=m
+          CONFIG_PACKAGE_lcms2=m
+          CONFIG_PACKAGE_libjbigkit=m
+          CONFIG_PACKAGE_libpng=m
+          CONFIG_PACKAGE_libjpeg-turbo=m
+          CONFIG_PACKAGE_zlib=m
+
+          CONFIG_PACKAGE_cups=m
+          CONFIG_PACKAGE_libcups=m
+          CONFIG_PACKAGE_libcupsimage=m
+          CONFIG_PACKAGE_libppd=m
+          CONFIG_PACKAGE_libcupsfilters=m
+
+          CONFIG_PACKAGE_poppler=m
+          CONFIG_PACKAGE_qpdf=m
+
+          CONFIG_PACKAGE_ghostscript=m
+          CONFIG_PACKAGE_ghostscript-fonts-std=m
+
+          CONFIG_PACKAGE_foomatic-filters=m
+          CONFIG_PACKAGE_openprinting-cups-filters=m
+
+          CONFIG_PACKAGE_gutenprint=m
+          CONFIG_PACKAGE_splix=m
+          CONFIG_PACKAGE_foo2zjs=m
+          CONFIG_PACKAGE_foo2zjs-extra=m
+          EOF
           
           make olddefconfig
 
