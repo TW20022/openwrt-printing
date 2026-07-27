@@ -34,12 +34,12 @@ jobs:
         echo "src-git printing https://github.com/TW20022/openwrt-printing-packages.git" >> feeds.conf
 
         ./scripts/feeds update -a
-        ./scripts/feeds install -a -p printing
+        # 注意：这里安装 printing feed 下的所有包，必须加 -a，确保 libcups 等依赖被真正软链接
+        ./scripts/feeds install -a
 
         cat > .config <<'EOF'
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
-
         CONFIG_PACKAGE_libcups=y
         CONFIG_PACKAGE_libcupsimage=y
         CONFIG_PACKAGE_libjbigkit=y
@@ -48,17 +48,11 @@ jobs:
 
         make defconfig
 
-    - name: Compile SpliX with Environment (Debug Mode, Single Thread)
+    - name: Compile SpliX and Dependencies
       run: |
         cd openwrt-sdk
-        
-        export STAGING_DIR="$(pwd)/staging_dir/target-mipsel_24kc_musl"
-        export PKG_CONFIG_PATH="$STAGING_DIR/usr/lib/pkgconfig:$STAGING_DIR/usr/share/pkgconfig"
-        export PKG_CONFIG_SYSROOT_DIR="$STAGING_DIR"
-
-        make package/feeds/printing/libcups/compile V=s -j1
-        make package/feeds/printing/libcupsimage/compile V=s -j1
-        make package/feeds/printing/libjbigkit/compile V=s -j1
+        # 直接编译 splix。OpenWrt SDK 的包编译会自动处理好 libcups、libjbigkit 等前置依赖，
+        # 不需要手动一行行去 make 每一个底层库。
         make package/feeds/printing/splix/compile V=s -j1
 
     - name: Upload SpliX IPK Artifact
