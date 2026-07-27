@@ -28,7 +28,7 @@ jobs:
       run: |
         cd openwrt-sdk
         ./scripts/feeds update -a
-        ./scripts/feeds install libcups libstdcpp zlib libjpeg-turbo jbigkit
+        ./scripts/feeds install libcups libstdcpp zlib libjpeg-turbo
 
     - name: Inject Custom SpliX Package
       run: |
@@ -54,7 +54,8 @@ jobs:
           CATEGORY:=Utilities
           SUBMENU:=Printing
           TITLE:=Samsung/Xerox SPL printer driver for CUPS
-          DEPENDS:=+libcups +libstdcpp +zlib +libjpeg +jbigkit
+          # 移除了不存在的 jbigkit，只保留 OP 官方确切存在的依赖
+          DEPENDS:=+libcups +libstdcpp +zlib +libjpeg
           URL:=https://github.com/OpenPrinting/splix
         endef
 
@@ -65,6 +66,7 @@ jobs:
 
         MAKE_FLAGS += \
         	CUPSCONFIG="$(STAGING_DIR)/usr/bin/cups-config" \
+        	DISABLE_JBIG=1 \
         	OPTIM_CFLAGS="$(TARGET_CFLAGS) -Wno-error" \
         	OPTIM_CXXFLAGS="$(TARGET_CXXFLAGS) -Wno-error -std=gnu++11"
 
@@ -87,7 +89,6 @@ jobs:
         CONFIG_TARGET_ramips_mt7621_Generic=y
         CONFIG_PACKAGE_libcups=y
         CONFIG_PACKAGE_libstdcpp=y
-        CONFIG_PACKAGE_jbigkit=y
         CONFIG_PACKAGE_splix=y
         EOF
         make defconfig >/dev/null
