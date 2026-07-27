@@ -1,23 +1,24 @@
-name: Build Splix Package (MT7621 SDK)
+name: Build SpliX Driver Only
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
 
 jobs:
-  build:
+  build-splix:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout
+    - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Install dependencies
+    - name: Install build dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd \
-          libcups2-dev libfontconfig1-dev libjpeg-dev libpng-dev zlib1g-dev liblcms2-dev libtiff-dev libfreetype6-dev \
-          enscript bc dc poppler-utils \
-          libpaper-dev pkg-config perl
+        sudo apt-get install -y build-essential libncurses5-dev libncursesw5-dev \
+          zlib1g-dev gawk git gettext libssl-dev xsltproc rsync wget unzip python3
 
     - name: Download and extract SDK
       run: |
@@ -30,67 +31,39 @@ jobs:
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
-        # 1. 更新为你 Fork 后的新仓库地址
-        echo "src-git printing https://github.com/TW20022/openwrt-printing-packages.git" >> feeds.conf
+        echo "src-git printing https://github.com/master-0123/openwrt-printing-packages.git" >> feeds.conf
 
         ./scripts/feeds update -a
         ./scripts/feeds install -a -p printing
 
-        # 仅选中 RAX3000QY (MT7621) 架构及 splix
         cat > .config <<'EOF'
         CONFIG_TARGET_ramips=y
         CONFIG_TARGET_ramips_mt7621=y
-        CONFIG_TARGET_ramips_mt7621_DEVICE_sanji_ra-x3000qy=y
+
+        CONFIG_PACKAGE_cups=y
+        CONFIG_PACKAGE_libcups=y
+        CONFIG_PACKAGE_libcupsimage=y
+        CONFIG_PACKAGE_libjbigkit=y
         CONFIG_PACKAGE_splix=y
         EOF
 
-        # 自动补全 splix 所需的所有依赖配置 (+libcups, +libjbigkit, +libpng 等)
         make defconfig
 
-    - name: Apply Compatibility Fixes
+    - name: Compile SpliX with Environment
       run: |
         cd openwrt-sdk
-        # 1. 软链接兼容性修复
-        mkdir -p staging_dir build_dir
-        REAL_TARGET_STAGING=$(ls -d staging_dir/target-mipsel_* 2>/dev/null | head -n 1)
-        REAL_TARGET_BUILD=$(ls -d build_dir/target-mipsel_* 2>/dev/null | head -n 1)
         
-        if [ -n "$REAL_TARGET_STAGING" ]; then
-          mkdir -p "$REAL_TARGET_STAGING/usr/lib" "$REAL_TARGET_STAGING/usr/include"
-          [ ! -e staging_dir/target-mipsel_24kc_musl ] && ln -sf $(basename "$REAL_TARGET_STAGING") staging_dir/target-mipsel_24kc_musl
-        fi
-        if [ -n "$REAL_TARGET_BUILD" ]; then
-          [ ! -e build_dir/target-mipsel_24kc_musl ] && ln -sf $(basename "$REAL_TARGET_BUILD") build_dir/target-mipsel_24kc_musl
-        fi
+        # 导出交叉编译的 pkg-config 路径，解决 splix 找不到 cups 的问题
+        export STAGING_DIR="$(pwd)/staging_dir/target-mipsel_24kc_musl"
+        export PKG_CONFIG_PATH="$STAGING_DIR/usr/lib/pkgconfig:$STAGING_DIR/usr/share/pkgconfig"
+        export PKG_CONFIG_SYSROOT_DIR="$STAGING_DIR"
 
-        # 2. 修复 libjbigkit 在 GCC 13 下的 -ansi/-pedantic 严格模式问题
-        if [ -d "package/feeds/printing/libjbigkit" ]; then
-          echo "Applying fix for libjbigkit C flags..."
-          find package/feeds/printing/libjbigkit/ -type f \( -name "Makefile" -o -name "*.patch" \) -exec sed -i 's/-ansi//g; s/-pedantic//g' {} + || true
-        fi
+        # 优先编译底层依赖 cups，然后编译 splix
+        make package/feeds/printing/cups/compile -j$(nproc) || true
+        make package/feeds/printing/splix/compile V=s -j$(nproc)
 
-    - name: Build splix and its dependencies
-      run: |
-        cd openwrt-sdk
-        echo "=== Start building splix ==="
-
-        # 先优先编译底层依赖 libjbigkit
-        make package/feeds/printing/libjbigkit/compile V=s BUILD_KEY=1 || true
-
-        # 编译 splix（SDK 会自动处理其余的 cups/png 等基础库）
-        make package/feeds/printing/splix/compile V=s BUILD_KEY=1 -j1
-
-    - name: List generated IPK files
-      run: |
-        cd openwrt-sdk
-        echo "=== Generated IPK List ==="
-        find bin/ -type f -name "*.ipk" | sort
-
-    - name: Upload IPK artifacts
+    - name: Upload SpliX IPK Artifact
       uses: actions/upload-artifact@v4
       with:
-        name: splix-ipk-mt7621
-        path: |
-          openwrt-sdk/bin/packages/**/splix*.ipk
-          openwrt-sdk/bin/packages/**/libjbig*.ipk
-        if-no-files-found: warn
+        name: mt7621-splix-ipk
+        path: openwrt-sdk/bin/packages/mipsel_24kc/printing/splix*.ipk
