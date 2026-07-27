@@ -1,4 +1,4 @@
-name: Build OpenWrt Printing Packages MT7621 all
+name: Build OpenWrt Printing Packages MT7621 All
 
 on:
   push:
@@ -39,7 +39,6 @@ jobs:
             enscript poppler-utils libpaper-dev
 
       - name: Download and extract SDK
-        # 如果缓存命中了 openwrt-sdk 目录，则跳过下载解压
         run: |
           if [ -d "openwrt-sdk" ] && [ -f "openwrt-sdk/Makefile" ]; then
             echo "SDK already exists from cache."
@@ -122,58 +121,23 @@ jobs:
             sed -i 's/CONFIGURE_ARGS+=/CONFIGURE_ARGS+= ac_cv_func_malloc_0_nonnull=yes ac_cv_func_realloc_0_nonnull=yes /g' package/feeds/printing/gutenprint/Makefile
           fi
 
-      - name: Build Printing Packages with Multi-core & Fallback Retry
+      - name: Build All Configured Packages (Global World Make)
         run: |
-          set -e
           cd openwrt-sdk
-          SUCCESS_LIST=""
-          FAILED_LIST=""
-          
-          mkdir -p ../failed_logs
-
-          # 自动获取当前 runner 的最大可用核心数（ubuntu-22.04 通常是 2 或 4 核）
           JOBS=$(nproc)
           echo ">>> Using max parallel jobs: $JOBS"
-
-          for pkg in cairo lcms2 libjbigkit libpng libjpeg-turbo cups libcups libcupsimage libppd libcupsfilters poppler qpdf ghostscript ghostscript-fonts-std foomatic-filters openprinting-cups-filters gutenprint splix foo2zjs foo2zjs-extra; do
-            echo ">>> [Attempt 1] Building $pkg with multi-core (-j$JOBS) ..."
-            
-            # 1. 优先尝试多核并行编译
-            if make package/$pkg/compile V=s -j$JOBS; then
-              SUCCESS_LIST="$SUCCESS_LIST $pkg"
-            else
-              echo "!!! [Attempt 1 Failed] $pkg failed with -j$JOBS. Cleaning and retrying with single-thread (-j1)..."
-              
-              # 2. 清理失败现场
-              make package/$pkg/clean || true
-              
-              # 3. 降级到单线程（-j1）重试（很多并行下由于 Makefile 依赖漏写导致的竞态条件，在单线程下能顺利通过）
-              if make package/$pkg/compile V=s -j1; then
-                echo ">>> [Attempt 2 Success] $pkg built successfully on single-thread fallback."
-                SUCCESS_LIST="$SUCCESS_LIST $pkg"
-              else
-                echo "!!! [Final Failure] $pkg failed even with single-thread."
-                FAILED_LIST="$FAILED_LIST $pkg"
-                mkdir -p ../failed_logs/$pkg
-                cp -r build_dir/target-*/$pkg-* ../failed_logs/$pkg/ 2>/dev/null || true
-              fi
-            fi
-          done
-
-          echo "=== Build Summary ==="
-          echo "Success: $SUCCESS_LIST"
-          echo "Failed: $FAILED_LIST"
+          
+          # 直接全局编译，确保 .config 中所有选中的包和依赖全部生成
+          if make world V=s -j$JOBS; then
+            echo ">>> Build completed successfully!"
+          else
+            echo "!!! Build failed with multi-core, cleaning and retrying with single-thread (-j1)..."
+            make clean || true
+            make world V=s -j1
+          fi
 
       - name: Upload IPK Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-printing-packages
           path: openwrt-sdk/bin/packages/**/*.ipk
-
-      - name: Upload Failed Logs
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: printing-failed-logs
-          path: failed_logs/**
-          if-no-files-found: ignore
