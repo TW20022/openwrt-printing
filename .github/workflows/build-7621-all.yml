@@ -1,30 +1,21 @@
-name: Build OpenWrt Printing Packages MT7621 All
+name: Build OpenWrt Printing Packages
 
 on:
   push:
+    branches: [ "main", "master" ]
+  pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-
+    
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Cache OpenWrt SDK and Build Artifacts
-        uses: actions/cache@v4
-        with:
-          path: |
-            openwrt-sdk/dl
-            openwrt-sdk/build_dir
-            ~/.openwrt-feeds
-          key: ${{ runner.os }}-openwrt-build-mt7621-${{ hashFiles('feeds.conf') }}
-          restore-keys: |
-            ${{ runner.os }}-openwrt-build-mt7621-
-
-      - name: Install Host Dependencies
+      - name: Install Dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -37,70 +28,67 @@ jobs:
             liblcms2-dev libjbig-dev \
             libtool automake autoconf perl pkg-config \
             enscript poppler-utils libpaper-dev
+          sudo apt-get autoremove --purge -y
+          sudo apt-get clean
 
-      - name: Download and extract SDK
+      - name: Clone OpenWrt Source (v24.10.5)
         run: |
-          if [ -d "openwrt-sdk" ] && [ -f "openwrt-sdk/Makefile" ]; then
-            echo "SDK already exists from cache."
-          else
-            wget -q https://downloads.openwrt.org/releases/24.10.5/targets/ramips/mt7621/openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
-            tar -xf openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64.tar.zst
-            rm -rf openwrt-sdk
-            mv openwrt-sdk-24.10.5-ramips-mt7621_gcc-13.3.0_musl.Linux-x86_64 openwrt-sdk
-            rm -f *.zst
-          fi
-
-      - name: Configure feeds and target
-        run: |
-          cd openwrt-sdk
-          cp feeds.conf.default feeds.conf
-          echo "src-git printing https://github.com/TW20022/openwrt-printing-packages.git" >> feeds.conf
-
-          ./scripts/feeds update -a
-
-          # 剔除 printing feed 中与官方冲突的基础底层库目录
-          rm -rf feeds/printing/cairo || true
-          rm -rf feeds/printing/libpng || true
-          rm -rf feeds/printing/libjpeg-turbo || true
-          rm -rf feeds/printing/zlib || true
-          rm -rf feeds/printing/lcms2 || true
-
+          git clone --branch v24.10.5 --depth 1 https://git.openwrt.org/openwrt/openwrt.git openwrt-source
+          cd openwrt-source
+          
+          # 引入本地仓库作为 printing feed
+          echo "src-link printing ${{ github.workspace }}" >> feeds.conf.default
+          
+          # -f 参数强制覆盖已有源，避免 pull 冲突
+          ./scripts/feeds update -a -f
           ./scripts/feeds install -a
 
-          cat > .config <<'EOF'
-          CONFIG_TARGET_ramips=y
-          CONFIG_TARGET_ramips_mt7621=y
+      - name: Configure Target and Packages
+        run: |
+          cd openwrt-source
+          
+          # 1. 初始化配置
+          make defconfig
+          
+          # 2. 设置 Target 为 ramips / mt7621
+          ./scripts/config --set-val TARGET_ramips y
+          ./scripts/config --set-val TARGET_ramips_mt7621 y
+          ./scripts/config --set-val TARGET_ROOTFS_TARGZ y
 
-          CONFIG_PACKAGE_cairo=y
-          CONFIG_PACKAGE_lcms2=y
-          CONFIG_PACKAGE_libjbigkit=y
-          CONFIG_PACKAGE_libpng=y
-          CONFIG_PACKAGE_libjpeg-turbo=y
-          CONFIG_PACKAGE_zlib=y
+          # 3. 启用 printing 相关包及其核心依赖（以模块 m 形式编译生成 ipk）
+          for pkg in \
+            dbus cairo lcms2 libjbigkit libpng libjpeg-turbo zlib \
+            cups libcups libcupsimage libppd libcupsfilters \
+            poppler qpdf ghostscript ghostscript-fonts-std \
+            foomatic-filters openprinting-cups-filters \
+            gutenprint splix foo2zjs foo2zjs-extra; do
+            ./scripts/config --enable-package-$pkg 2>/dev/null || ./scripts/config --set-m PACKAGE_$pkg || true
+          done
 
-          CONFIG_PACKAGE_cups=y
-          CONFIG_PACKAGE_libcups=y
-          CONFIG_PACKAGE_libcupsimage=y
-          CONFIG_PACKAGE_libppd=y
-          CONFIG_PACKAGE_libcupsfilters=y
-
-          CONFIG_PACKAGE_poppler=y
-          CONFIG_PACKAGE_qpdf=y
-
-          CONFIG_PACKAGE_ghostscript=y
-          CONFIG_PACKAGE_ghostscript-fonts-std=y
-
-          CONFIG_PACKAGE_foomatic-filters=y
-          CONFIG_PACKAGE_openprinting-cups-filters=y
-
-          CONFIG_PACKAGE_gutenprint=y
-          CONFIG_PACKAGE_splix=y
-          CONFIG_PACKAGE_foo2zjs=y
-          CONFIG_PACKAGE_foo2zjs-extra=y
-          EOF
-
+          # 4. 自动补全依赖树
           make defconfig
 
+      - name: Build Printing Packages Only
+        run: |
+          cd openwrt-source
+          JOBS=$(nproc)
+          echo ">>> Using parallel jobs: $JOBS"
+          
+          # 仅编译 IPK 包。使用 V=e 保持精简日志（保留必要的错误提示，去掉了 1>/dev/null 避免无法排错）
+          make package/compile V=e -j$JOBS || make package/compile V=e -j1
+
+      - name: Collect IPK Artifacts
+        run: |
+          mkdir -p printing-ipks
+          # 收集所有编译生成的 ipk 文件（包含打印包及其编译好的依赖）
+          find openwrt-source/bin/packages -name "*.ipk" -exec cp {} printing-ipks/ \;
+          ls -la printing-ipks/
+
+      - name: Upload IPK Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-printing-ipks
+          path: printing-ipks/*.ipk
       - name: Apply Compatibility Fixes
         run: |
           cd openwrt-sdk
