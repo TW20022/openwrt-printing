@@ -35,6 +35,7 @@ jobs:
         CONFIG_TARGET_x86=y
         CONFIG_TARGET_x86_64=y
         CONFIG_TARGET_x86_64_Generic=y
+        CONFIG_PACKAGE_hplip=y
         EOF
 
         make defconfig
@@ -43,10 +44,8 @@ jobs:
       run: |
         cd openwrt-sdk
         echo "=== Start building selected printing packages ==="
-        for pkg in python3-dbus hplip; do
-          echo ">>> Building $pkg ..."
-          make package/feeds/printing/$pkg/compile -j1 V=s || echo "!!! $pkg failed"
-        done
+        make defconfig
+        make package/feeds/printing/hplip/compile -j1 V=s
         echo "=== Build finished ==="
 
     - name: List generated IPK files
