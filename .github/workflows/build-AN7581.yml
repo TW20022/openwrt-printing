@@ -53,7 +53,7 @@ jobs:
         echo "=== Start building printing packages ==="
         for pkg in $(ls -1 package/feeds/printing); do
           echo ">>> Building $pkg ..."
-          make package/feeds/printing/$pkg/compile -j1 V=e || echo "!!! $pkg failed"
+          make package/feeds/printing/$pkg/compile -j$(nproc) >/dev/null 2>&1 || echo "!!! $pkg failed"
         done
         echo "=== Build finished ==="
 
