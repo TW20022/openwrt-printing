@@ -1,4 +1,4 @@
-name: Debug Packages (MT7621 SDK)
+name: Debug Packages (IPQ50XX SDK)
 
 on:
   workflow_dispatch:
