@@ -1,4 +1,4 @@
-name: Debug Packages (IPQ50XX SDK)
+name: Debug IPQ50XX SDK
 
 on:
   workflow_dispatch:
@@ -27,12 +27,11 @@ jobs:
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
         echo "src-git printing https://github.com/TW20022/openwrt-24-printing-packages.git" >> feeds.conf
+        
         rm -rf tmp/
         ./scripts/feeds update printing packages
-        ./scripts/feeds install cups cups-filters ghostscript ghostscript-fonts-std ghostscript-gnu-gs-fonts liberation-fonts lcms2 libcairo libjbigkit poppler qpdf foo2zjs gutenprint splix foomatic-filters
-        find package/feeds/packages/ -name "Makefile" -exec sed -i 's/-Werror//g' {} +
+        ./scripts/feeds install cups cups-filters ghostscript ghostscript-fonts-std ghostscript-gnu-gs-fonts liberation-fonts lcms2 libcairo libjbigkit poppler qpdf foo2zjs gutenprint splix foomatic-filters libpng zlib
 
-        # 精简 .config
         cat > .config <<'EOF'
         CONFIG_TARGET_qualcommax=y
         CONFIG_TARGET_qualcommax_ipq50xx=y
@@ -41,12 +40,21 @@ jobs:
 
         make defconfig
 
-    - name: Build selected printing packages (with error logs)
+    - name: Build prerequisite libraries first
       run: |
         cd openwrt-sdk
-        
+        echo "=== Building zlib and libpng prerequisites ==="
+        make package/zlib/compile -j$(nproc)
+        make package/libpng/compile -j$(nproc)
+
+    - name: Build selected printing packages
+      run: |
+        cd openwrt-sdk
         echo "=== Start building selected printing packages ==="
-        make package/feeds/packages/libpng/compile V=s -j1
+        for pkg in cups cups-filters ghostscript ghostscript-fonts-std ghostscript-gnu-gs-fonts liberation-fonts lcms2 libcairo libjbigkit poppler qpdf foo2zjs gutenprint splix foomatic-filters; do
+          echo ">>> Building $pkg ..."
+          make package/$pkg/compile -j$(nproc) || make package/$pkg/compile -j1 V=s || echo "!!! $pkg failed"
+        done
         echo "=== Build finished ==="
 
     - name: List generated IPK files
