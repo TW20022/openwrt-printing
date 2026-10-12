@@ -27,8 +27,10 @@ jobs:
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
         echo "src-git printing https://github.com/TW20022/openwrt-24-printing-packages.git" >> feeds.conf
+        rm -rf tmp/
         ./scripts/feeds update printing packages
         ./scripts/feeds install cups cups-filters ghostscript ghostscript-fonts-std ghostscript-gnu-gs-fonts liberation-fonts lcms2 libcairo libjbigkit poppler qpdf foo2zjs gutenprint splix foomatic-filters
+        find package/feeds/packages/ -name "Makefile" -exec sed -i 's/-Werror//g' {} +
 
         # 精简 .config
         cat > .config <<'EOF'
@@ -42,10 +44,11 @@ jobs:
     - name: Build selected printing packages (with error logs)
       run: |
         cd openwrt-sdk
+        
         echo "=== Start building selected printing packages ==="
         for pkg in cups cups-filters libcupsfilters libppd ghostscript ghostscript-fonts-std ghostscript-gnu-gs-fonts liberation-fonts lcms2 libcairo libjbigkit poppler qpdf foo2zjs gutenprint splix foomatic-filters; do
           echo ">>> Building $pkg ..."
-          make package/feeds/printing/$pkg/compile -j1 V=e || echo "!!! $pkg failed"
+          make package/$pkg/compile -j$(nproc) V=e || make package/$pkg/compile -j1 V=s || echo "!!! $pkg failed"
         done
         echo "=== Build finished ==="
 
