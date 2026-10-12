@@ -1,4 +1,4 @@
-name: Build Snapsshots Printing Packages (IPQ50XX SDK)
+name: Debug Packages (MT7621 SDK)
 
 on:
   workflow_dispatch:
@@ -14,10 +14,8 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential gawk flex bison git wget unzip \
-        python3 python3-pip python3-setuptools python3-wheel python3-dev \
-        zstd libncurses-dev libssl-dev file rsync itstool gettext \
-        libjpeg-dev zlib1g-dev libpixman-1-dev
+        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-dev python3-pip python3-setuptools python3-wheel zstd uuid-dev libuuid1 libncurses5-dev libncursesw5-dev libssl-dev libffi-dev zlib1g-dev file libtool autoconf automake pkg-config
+
     - name: Download and extract SDK
       run: |
         wget -q https://downloads.openwrt.org/snapshots/targets/qualcommax/ipq50xx/openwrt-sdk-qualcommax-ipq50xx_gcc-14.4.0_musl.Linux-x86_64.tar.zst
@@ -29,8 +27,8 @@ jobs:
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
         echo "src-git printing https://github.com/TW20022/openwrt-24-printing-packages.git" >> feeds.conf
-        ./scripts/feeds update -a >/dev/null
-        ./scripts/feeds install -a >/dev/null
+        ./scripts/feeds update -a
+        ./scripts/feeds install -a
 
         # 精简 .config
         cat > .config <<'EOF'
@@ -39,32 +37,26 @@ jobs:
         CONFIG_TARGET_DEVICE_qualcommax_ipq50xx_DEVICE_cmcc_rax3000q=y
         EOF
 
-        make defconfig >/dev/null
+        make defconfig
 
-    - name: Show printing feed packages
+    - name: Build selected printing packages (with error logs)
       run: |
         cd openwrt-sdk
-        echo "=== Printing feed packages ==="
-        ls -1 package/feeds/printing
-
-    - name: Build printing packages (auto scan)
-      run: |
-        cd openwrt-sdk
-        echo "=== Start building printing packages ==="
-        for pkg in $(ls -1 package/feeds/printing); do
+        echo "=== Start building selected printing packages ==="
+        for pkg in cups cups-filters libcupsfilters libppd ghostscrip ghostscript-fonts-std ghostscript-gnu-gs-fonts liberation-fonts lcms2 libcairo libjbigkit poppler qpdf foo2zjs gutenprint splix foomatic-filters; do
           echo ">>> Building $pkg ..."
-          make package/feeds/printing/$pkg/compile -j$(nproc) >/dev/null 2>&1 || echo "!!! $pkg failed"
+          make package/feeds/printing/$pkg/compile -j1 V=e || echo "!!! $pkg failed"
         done
         echo "=== Build finished ==="
 
-    - name: List generated APK files
+    - name: List generated IPK files
       run: |
         cd openwrt-sdk
-        echo "=== Printing APK files ==="
-        find bin/packages -type f -name "*.apk"
+        echo "=== Printing IPK files ==="
+        find bin/packages -type f -name "*.ipk"
 
-    - name: Upload all APK artifacts
+    - name: Upload all IPK artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: all-apk
-        path: openwrt-sdk/bin/packages/**/*.apk
+        name: selected-ipk
+        path: openwrt-sdk/bin/packages/**/*.ipk
