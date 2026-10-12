@@ -46,10 +46,7 @@ jobs:
         cd openwrt-sdk
         
         echo "=== Start building selected printing packages ==="
-        for pkg in cups cups-filters libcupsfilters libppd ghostscript ghostscript-fonts-std ghostscript-gnu-gs-fonts liberation-fonts lcms2 libcairo libjbigkit poppler qpdf foo2zjs gutenprint splix foomatic-filters; do
-          echo ">>> Building $pkg ..."
-          make package/$pkg/compile -j$(nproc) V=e || make package/$pkg/compile -j1 V=s || echo "!!! $pkg failed"
-        done
+        make package/feeds/packages/libpng/compile V=s -j1
         echo "=== Build finished ==="
 
     - name: List generated IPK files
