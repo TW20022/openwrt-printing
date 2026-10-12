@@ -1,4 +1,4 @@
-name: Debug IPQ50XX SDK
+name: Build Printing Packages (IPQ50XX SDK)
 
 on:
   workflow_dispatch:
@@ -30,7 +30,7 @@ jobs:
         
         rm -rf tmp/
         ./scripts/feeds update printing packages
-        ./scripts/feeds install cups cups-filters ghostscript ghostscript-fonts-std ghostscript-gnu-gs-fonts liberation-fonts lcms2 libcairo libjbigkit poppler qpdf foo2zjs gutenprint splix foomatic-filters libpng zlib
+        ./scripts/feeds install cups cups-filters ghostscript ghostscript-fonts-std ghostscript-gnu-gs-fonts liberation-fonts lcms2 libcairo libjbigkit poppler qpdf foo2zjs gutenprint splix foomatic-filters
 
         cat > .config <<'EOF'
         CONFIG_TARGET_qualcommax=y
@@ -40,19 +40,13 @@ jobs:
 
         make defconfig
 
-    - name: Build prerequisite libraries first
-      run: |
-        cd openwrt-sdk
-        echo "=== Building zlib and libpng prerequisites ==="
-        make package/zlib/compile -j$(nproc)
-        make package/libpng/compile -j$(nproc)
-
     - name: Build selected printing packages
       run: |
         cd openwrt-sdk
-        echo "=== Start building selected printing packages ==="
+        echo "=== Start building printing packages via standard dependency tree ==="
         for pkg in cups cups-filters ghostscript ghostscript-fonts-std ghostscript-gnu-gs-fonts liberation-fonts lcms2 libcairo libjbigkit poppler qpdf foo2zjs gutenprint splix foomatic-filters; do
           echo ">>> Building $pkg ..."
+          # 直接使用标准路径或直接编译目标，让 SDK 自动处理 zlib/libpng 等前置依赖
           make package/$pkg/compile -j$(nproc) || make package/$pkg/compile -j1 V=s || echo "!!! $pkg failed"
         done
         echo "=== Build finished ==="
