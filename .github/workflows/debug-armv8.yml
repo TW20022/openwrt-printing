@@ -32,7 +32,9 @@ jobs:
 
         # 精简 .config
         cat > .config <<'EOF'
-        CONFIG_PACKAGE_cups=y
+        CONFIG_PACKAGE_foo2zjs=y
+        CONFIG_PACKAGE_gutenprint=y
+        CONFIG_PACKAGE_splix=y  
         EOF
 
         make defconfig >/dev/null
@@ -47,10 +49,9 @@ jobs:
       run: |
         cd openwrt-sdk
         echo "=== Start building printing packages ==="
-        for pkg in $(ls -1 package/feeds/printing); do
-          echo ">>> Building $pkg ..."
-          make package/feeds/printing/$pkg/compile -j$(nproc) >/dev/null 2>&1 || echo "!!! $pkg failed"
-        done
+        make package/foo2zjs/compile -j1 V=sc
+        make package/gutenprint/compile -j1 V=sc
+        make package/splix/compile -j1 V=sc
         echo "=== Build finished ==="
 
     - name: List generated IPK files
