@@ -87,7 +87,7 @@ jobs:
 
         - name: 添加第三方 Feed 并配置
           env:
-            CUSTOM_FEED_REPO: "https://github.com/TW20022/openwrt-24-printing-pack.git"
+            CUSTOM_FEED_REPO: "github.com/TW20022/openwrt-24-printing-packages.git"
             CUSTOM_FEED_NAME: "printing"
             TARGET_PACKAGES_INPUT: "${{ inputs.target_packages }}"
           run: |
