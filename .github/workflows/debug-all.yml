@@ -37,108 +37,114 @@ on:
 
 jobs:
   build:
-      runs-on: ubuntu-22.04
+    runs-on: ubuntu-22.04
 
-      steps:
-        - name: 检出代码 (Checkout)
-          uses: actions/checkout@v4
+    steps:
+      - name: 检出代码 (Checkout)
+        uses: actions/checkout@v4
 
-        - name: 初始化并补全编译环境依赖
-          run: |
-            sudo apt update -y
-            sudo apt install -y --no-install-recommends \
-                build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk \
-                git gettext libssl-dev xsltproc wget unzip libelf-dev \
-                python3-distutils python3-setuptools python3-dev zstd rsync ca-certificates file \
-                time diffutils subversion mercurial patchelf libgmp-dev libmpc-dev libmpfr-dev
+      - name: 初始化并补全编译环境依赖
+        run: |
+          sudo apt update -y
+          sudo apt install -y --no-install-recommends \
+              build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk \
+              git gettext libssl-dev xsltproc wget unzip libelf-dev \
+              python3-distutils python3-setuptools python3-dev zstd rsync ca-certificates file \
+              time diffutils subversion mercurial patchelf libgmp-dev libmpc-dev libmpfr-dev
 
-        - name: 解析架构并下载解压 SDK
-          env:
-            IMMORTALWRT_VERSION: ${{ inputs.immortalwrt_version }}
-            TARGET_COMBO: ${{ inputs.target_combo }}
-            GCC_VERSION: ${{ inputs.gcc_version }}
-            LIBC: 'musl'
-          run: |
-            # 自动拆分组合，例如 qualcommax:ipq807x 拆分为 ARCH=qualcommax, SUBTARGET=ipq807x
-            TARGET_ARCH="${TARGET_COMBO%%:*}"
-            TARGET_SUBTARGET="${TARGET_COMBO#*:}"
-            
-            echo "TARGET_ARCH=${TARGET_ARCH}" >> $GITHUB_ENV
-            echo "TARGET_SUBTARGET=${TARGET_SUBTARGET}" >> $GITHUB_ENV
-            echo "当前选择的目标架构: ${TARGET_ARCH}, 子架构: ${TARGET_SUBTARGET}"
+      - name: 解析架构并下载解压 SDK
+        env:
+          IMMORTALWRT_VERSION: ${{ inputs.immortalwrt_version }}
+          TARGET_COMBO: ${{ inputs.target_combo }}
+          GCC_VERSION: ${{ inputs.gcc_version }}
+          LIBC: 'musl'
+        run: |
+          # 自动拆分组合，例如 qualcommax:ipq807x 拆分为 ARCH=qualcommax, SUBTARGET=ipq807x
+          TARGET_ARCH="${TARGET_COMBO%%:*}"
+          TARGET_SUBTARGET="${TARGET_COMBO#*:}"
+          
+          echo "TARGET_ARCH=${TARGET_ARCH}" >> $GITHUB_ENV
+          echo "TARGET_SUBTARGET=${TARGET_SUBTARGET}" >> $GITHUB_ENV
+          echo "当前选择的目标架构: ${TARGET_ARCH}, 子架构: ${TARGET_SUBTARGET}"
 
-            WORKDIR="$(pwd)/immortalwrt_build"
-            sdk_tarname="immortalwrt-sdk-${IMMORTALWRT_VERSION}-${TARGET_ARCH}-${TARGET_SUBTARGET}_gcc-${GCC_VERSION}_${LIBC}.Linux-x86_64.tar.zst"
-            sdk_url="https://downloads.immortalwrt.org/releases/${IMMORTALWRT_VERSION}/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}/${sdk_tarname}"
+          WORKDIR="$(pwd)/immortalwrt_build"
+          sdk_tarname="immortalwrt-sdk-${IMMORTALWRT_VERSION}-${TARGET_ARCH}-${TARGET_SUBTARGET}_gcc-${GCC_VERSION}_${LIBC}.Linux-x86_64.tar.zst"
+          sdk_url="https://downloads.immortalwrt.org/releases/${IMMORTALWRT_VERSION}/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}/${sdk_tarname}"
 
-            mkdir -p "$WORKDIR"
-            echo "下载 SDK: ${sdk_url}"
-            wget -P "$WORKDIR" "$sdk_url" || {
-                echo "警告：从正式 releases 下载失败，尝试从 snapshots 或通用路径查找，或请检查版本兼容性"
-                exit 1
-            }
+          mkdir -p "$WORKDIR"
+          echo "下载 SDK: ${sdk_url}"
+          wget -P "$WORKDIR" "$sdk_url" || {
+              echo "错误：SDK 下载失败，请检查版本号或目标/子架构组合是否匹配"
+              exit 1
+          }
 
-            echo "解压 SDK..."
-            tar --zstd -xf "${WORKDIR}/${sdk_tarname}" -C "$WORKDIR"
-            
-            SDK_DIR=$(find "$WORKDIR" -maxdepth 1 -type d -name "immortalwrt-sdk-*" | head -n1)
-            echo "SDK_DIR=${SDK_DIR}" >> $GITHUB_ENV
-            echo "SDK 目录：${SDK_DIR}"
+          echo "解压 SDK..."
+          tar --zstd -xf "${WORKDIR}/${sdk_tarname}" -C "$WORKDIR"
+          
+          SDK_DIR=$(find "$WORKDIR" -maxdepth 1 -type d -name "immortalwrt-sdk-*" | head -n1)
+          echo "SDK_DIR=${SDK_DIR}" >> $GITHUB_ENV
+          echo "SDK 目录：${SDK_DIR}"
 
-        - name: 添加第三方 Feed 并配置
-          env:
-            CUSTOM_FEED_REPO: "github.com/TW20022/openwrt-24-printing-packages.git"
-            CUSTOM_FEED_NAME: "printing"
-            TARGET_PACKAGES_INPUT: "${{ inputs.target_packages }}"
-          run: |
-            cd "${{ env.SDK_DIR }}"
-            echo "添加第三方 feed：${CUSTOM_FEED_REPO}"
-            echo "src-git ${CUSTOM_FEED_NAME} ${CUSTOM_FEED_REPO}" >> feeds.conf.default
+      - name: 添加第三方 Feed 并配置
+        env:
+          CUSTOM_FEED_REPO: "https://github.com/TW20022/openwrt-24-printing-pack.git"
+          CUSTOM_FEED_NAME: "printing"
+          TARGET_PACKAGES_INPUT: "${{ inputs.target_packages }}"
+        run: |
+          SDK_PATH="${{ env.SDK_DIR }}"
+          cd "${SDK_PATH}"
+          
+          echo "当前工作目录: $(pwd)"
+          echo "添加第三方 feed：${CUSTOM_FEED_REPO}"
+          echo "src-git ${CUSTOM_FEED_NAME} ${CUSTOM_FEED_REPO}" >> "${SDK_PATH}/feeds.conf.default"
 
-            echo "更新 feeds..."
-            ./scripts/feeds update -a
-            ./scripts/feeds install -a
+          echo "更新 feeds..."
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
-            if [ -z "${TARGET_PACKAGES_INPUT}" ]; then
-                echo "未指定 TARGET_PACKAGES，自动扫描 ${CUSTOM_FEED_NAME} feed 下的所有包..."
-                mapfile -t TARGET_PACKAGES < <(./scripts/feeds list -r "${CUSTOM_FEED_NAME}" | awk '{print $1}')
-            else
-                read -ra TARGET_PACKAGES <<< "${TARGET_PACKAGES_INPUT}"
-            fi
+          # 处理用户输入的包名（若为空则自动扫描 printing feed 下的所有包）
+          if [ -z "${TARGET_PACKAGES_INPUT}" ]; then
+              echo "未指定 TARGET_PACKAGES，自动扫描 ${CUSTOM_FEED_NAME} feed 下的所有包..."
+              mapfile -t TARGET_PACKAGES < <(./scripts/feeds list -r "${CUSTOM_FEED_NAME}" | awk '{print $1}')
+          else
+              read -ra TARGET_PACKAGES <<< "${TARGET_PACKAGES_INPUT}"
+          fi
 
-            echo "将对以下包进行配置编译：${TARGET_PACKAGES[*]}"
-            echo "TARGET_PACKAGES_LIST=${TARGET_PACKAGES[*]}" >> $GITHUB_ENV
+          echo "将对以下包进行配置编译：${TARGET_PACKAGES[*]}"
+          echo "TARGET_PACKAGES_LIST=${TARGET_PACKAGES[*]}" >> $GITHUB_ENV
 
-            make defconfig
+          make defconfig
 
-            for pkg in "${TARGET_PACKAGES[@]}"; do
-                echo "  选中包：${pkg}"
-                ./scripts/config --set "CONFIG_PACKAGE_${pkg}=m"
-            done
+          for pkg in "${TARGET_PACKAGES[@]}"; do
+              echo "  选中包：${pkg}"
+              ./scripts/config --set "CONFIG_PACKAGE_${pkg}=m"
+          done
 
-            make defconfig
+          make defconfig
 
-        - name: 下载源码与并行编译
-          run: |
-            cd "${{ env.SDK_DIR }}"
-            JOBS=$(nproc)
-            
-            echo "开始下载依赖源码..."
-            make download V=s -j"${JOBS}" || make download V=s -j"${JOBS}"
+      - name: 下载源码与并行编译
+        run: |
+          SDK_PATH="${{ env.SDK_DIR }}"
+          cd "${SDK_PATH}"
+          JOBS=$(nproc)
+          
+          echo "开始下载依赖源码..."
+          make download V=s -j"${JOBS}" || make download V=s -j"${JOBS}"
 
-            for pkg in ${TARGET_PACKAGES_LIST}; do
-                echo "==================== 编译 ${pkg} ===================="
-                make "package/${pkg}/compile" V=s -j"${JOBS}"
-            done
+          for pkg in ${TARGET_PACKAGES_LIST}; do
+              echo "==================== 编译 ${pkg} ===================="
+              make "package/${pkg}/compile" V=s -j"${JOBS}"
+          done
 
-        - name: 收集编译产物 (.ipk)
-          run: |
-            cd "${{ env.SDK_DIR }}"
-            mkdir -p "${GITHUB_WORKSPACE}/ipk_output"
-            find bin/packages -type f -name "*.ipk" -exec cp -v {} "${GITHUB_WORKSPACE}/ipk_output/" \;
+      - name: 收集编译产物 (.ipk)
+        run: |
+          SDK_PATH="${{ env.SDK_DIR }}"
+          cd "${SDK_PATH}"
+          mkdir -p "${GITHUB_WORKSPACE}/ipk_output"
+          find bin/packages -type f -name "*.ipk" -exec cp -v {} "${GITHUB_WORKSPACE}/ipk_output/" \;
 
-        - name: 上传 IPK 构件 (Artifacts)
-          uses: actions/upload-artifact@v4
-          with:
-            name: immortalwrt-ipk-${{ env.TARGET_ARCH }}-${{ env.TARGET_SUBTARGET }}
-            path: ipk_output/*.ipk
+      - name: 上传 IPK 构件 (Artifacts)
+        uses: actions/upload-artifact@v4
+        with:
+          name: immortalwrt-ipk-${{ env.TARGET_ARCH }}-${{ env.TARGET_SUBTARGET }}
+          path: ipk_output/*.ipk
