@@ -50,7 +50,9 @@ jobs:
             build-essential libncurses-dev libncursesw5-dev zlib1g-dev gawk \
             git gettext libssl-dev xsltproc wget unzip libelf-dev \
             python3 python3-setuptools python3-dev perl zstd rsync ca-certificates file \
-            time diffutils subversion mercurial patchelf libgmp-dev libmpc-dev libxml2-utils libmpfr-dev libsane-dev libsnmp-dev ghostscript
+            time diffutils subversion mercurial patchelf libgmp-dev libmpc-dev \
+            libxml2-utils libmpfr-dev libsane-dev libsnmp-dev ghostscript \
+            bison flex
 
       - name: Prepare Build Environment & SDK
         run: |
@@ -103,7 +105,7 @@ jobs:
 
           if [ -d feeds/packages/utils/hplip ]; then
             echo "[INFO] 移除官方 hplip"
-            rm -rf feeds/packages/utils/hplip[cite: 1]
+            rm -rf feeds/packages/utils/hplip
           fi
 
           # 自动获取第三方仓库中的所有包
@@ -135,7 +137,7 @@ jobs:
           read -r -a TARGET_PACKAGES <<< "${TARGET_PACKAGES_STR}"
 
           echo "=================================================="
-          echo " 准备开始编译，本次共有 ${#TARGET_PACKAGES[@]} 个软件包待编译："
+          echo " 准备开始编译, 本次共有 ${#TARGET_PACKAGES[@]} 个软件包待编译："
           echo "=================================================="
           for i in "${!TARGET_PACKAGES[@]}"; do
             echo "  $((i+1)). ${TARGET_PACKAGES[$i]}"
@@ -148,7 +150,7 @@ jobs:
           SUCCESS_LIST=()
           FAILED_LIST=()
 
-          # 核心改动：临时关闭 errexit，确保单包失败不影响后续包编译
+          # 临时关闭 errexit，确保单包失败不影响后续包编译
           set +e
 
           for pkg in "${TARGET_PACKAGES[@]}"; do
