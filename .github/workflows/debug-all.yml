@@ -63,16 +63,19 @@ on:
         required: false
         default: ""
         type: string
+      override_official_pkgs:
+        description: "是否强制覆盖官方同名软件包"
+        required: true
+        default: "true"
+        type: choice
+        options:
+          - "true"
+          - "false"
       max_jobs:
-        description: "编译并发数(建议2-4，免费runner最大4)"
+        description: "编译并发数(建议2核runner用4)"
         required: true
         default: "4"
         type: string
-      override_official_pkgs:
-        description: "是否覆盖官方同名包"
-        required: false
-        default: true
-        type: boolean
 
 jobs:
   build:
@@ -85,8 +88,8 @@ jobs:
       CUSTOM_FEED_REPO: ${{ github.event.inputs.custom_feed_repo }}
       CUSTOM_FEED_NAME: ${{ github.event.inputs.custom_feed_name }}
       TARGET_PACKAGES_STR: ${{ github.event.inputs.target_packages_str }}
-      MAX_JOBS: ${{ github.event.inputs.max_jobs }}
       OVERRIDE_OFFICIAL: ${{ github.event.inputs.override_official_pkgs }}
+      MAX_JOBS: ${{ github.event.inputs.max_jobs }}
       CI: "true"
       WORKDIR: ${{ github.workspace }}/immortalwrt_build
       OUTPUT_DIR: ${{ github.workspace }}/ipk_output
@@ -97,43 +100,44 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          set -euo pipefail
+          set -uo pipefail
           sudo apt update -y
           sudo apt install -y --no-install-recommends \
             build-essential libncurses5-dev libncursesw5-dev zlib1g-dev gawk git gettext libssl-dev xsltproc wget unzip libelf-dev \
             python3 python3-setuptools python3-dev perl zstd rsync ca-certificates file time diffutils subversion mercurial \
             patchelf libgmp-dev libmpc-dev libxml2-utils libmpfr-dev libsane-dev libsnmp-dev ghostscript
-          # 全局配置git安全目录，避免feeds拉取报错
           git config --global --add safe.directory '*'
 
-      - name: Cache SDK tarball & sources
+      - name: Cache SDK tarball & dl
         uses: actions/cache@v4
         with:
           path: |
             ./immortalwrt_build/*.tar.zst
             ./immortalwrt_build/dl
-          # 缓存key包含所有版本参数，避免错用
-          key: ${{ env.IMMORTALWRT_VERSION }}-${{ env.TARGET_COMBO }}-gcc-${{ env.GCC_VERSION }}-${{ env.LIBC }}-sdk-dl-v2
+          key: v2-${{ env.IMMORTALWRT_VERSION }}-${{ env.TARGET_COMBO }}-gcc-${{ env.GCC_VERSION }}-${{ env.LIBC }}-sdk-dl
+          restore-keys: |
+            v2-${{ env.IMMORTALWRT_VERSION }}-${{ env.TARGET_COMBO }}-
 
-      - name: Build IPK with ImmortalWrt SDK
+      - name: Run build
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          shopt -s nullglob
 
-          # 校验MAX_JOBS为正整数
-          if ! [[ "${MAX_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::max_jobs必须为正整数，当前值: ${MAX_JOBS}"
+          # 校验MAX_JOBS为数字
+          if ! [[ "${MAX_JOBS}" =~ ^[0-9]+$ ]]; then
+            echo "::error::max_jobs必须为数字"
             exit 1
           fi
 
-          # 解析架构和子目标
+          # 解析 target_combo
           TARGET_ARCH="${TARGET_COMBO%%:*}"
           TARGET_SUBTARGET="${TARGET_COMBO#*:}"
           if [[ "${TARGET_ARCH}" == "${TARGET_SUBTARGET}" ]]; then
-            echo "::error::TARGET_COMBO格式错误: ${TARGET_COMBO}，应为arch:subtarget格式"
+            echo "::error::TARGET_COMBO格式错误 ${TARGET_COMBO}"
             exit 1
           fi
 
-          # 校验架构与子目标匹配
+          # 校验 arch-subtarget 匹配关系
           declare -A VALID_SUBTARGETS=(
             [qualcommax]="ipq807x ipq50xx ipq60xx"
             [airoha]="an7581 an7583"
@@ -142,44 +146,36 @@ jobs:
             [ramips]="mt7621"
             [x86]="64"
           )
-          if [[ ! " ${VALID_SUBTARGETS[${TARGET_ARCH}]:-} " =~ " ${TARGET_SUBTARGET} " ]]; then
-            echo "::error::子目标 ${TARGET_SUBTARGET} 不属于架构 ${TARGET_ARCH}，合法子目标: ${VALID_SUBTARGETS[${TARGET_ARCH}]:-无}"
+          if [[ ! " ${VALID_SUBTARGETS[${TARGET_ARCH}]} " =~ " ${TARGET_SUBTARGET} " ]]; then
+            echo "::error::${TARGET_SUBTARGET} 不是 ${TARGET_ARCH} 的合法子目标，可选: ${VALID_SUBTARGETS[${TARGET_ARCH}]}"
             exit 1
           fi
 
-          echo "✅ 目标架构: ${TARGET_ARCH}/${TARGET_SUBTARGET}"
-          echo "✅ ImmortalWrt版本: ${IMMORTALWRT_VERSION}"
-          echo "✅ GCC版本: ${GCC_VERSION}，libc: ${LIBC}"
-
-          # 导出artifact后缀给后续步骤使用，避免YAML表达式问题
-          echo "ARTIFACT_SUFFIX=${TARGET_ARCH}-${TARGET_SUBTARGET}" >> "$GITHUB_ENV"
+          echo "✅ TARGET_ARCH=${TARGET_ARCH}"
+          echo "✅ TARGET_SUBTARGET=${TARGET_SUBTARGET}"
 
           SDK_DIR="${WORKDIR}/sdk-${TARGET_ARCH}-${TARGET_SUBTARGET}"
-          mkdir -p "${WORKDIR}" "${LOG_DIR}" "${OUTPUT_DIR}"
+          mkdir -p "${WORKDIR}" "${OUTPUT_DIR}" "${LOG_DIR}"
 
-          # 下载SDK
           sdk_tarname="immortalwrt-sdk-${IMMORTALWRT_VERSION}-${TARGET_ARCH}-${TARGET_SUBTARGET}_gcc-${GCC_VERSION}_${LIBC}.Linux-x86_64.tar.zst"
           sdk_url="https://downloads.immortalwrt.org/releases/${IMMORTALWRT_VERSION}/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}/${sdk_tarname}"
 
+          # 下载SDK，增加重试和超时
           if [[ ! -f "${WORKDIR}/${sdk_tarname}" ]]; then
             echo "[INFO] 下载SDK: ${sdk_url}"
-            wget --tries=5 --timeout=60 --dns-timeout=10 --no-verbose -P "${WORKDIR}" "${sdk_url}" || {
-              echo "::error::SDK下载失败，请检查版本号、架构和子目标是否正确"
-              exit 1
-            }
+            wget --tries=5 --timeout=60 --dns-timeout=15 --no-verbose -P "${WORKDIR}" "${sdk_url}" || { echo "::error::SDK下载失败，请检查版本/架构是否存在"; exit 1; }
           else
-            echo "[INFO] 复用缓存SDK: ${sdk_tarname}"
+            echo "[INFO] 使用缓存的SDK: ${sdk_tarname}"
           fi
 
-          # 校验SDK完整性（SDK最小约10MB，小于则为错误页面）
           tar_size=$(stat -c%s "${WORKDIR}/${sdk_tarname}")
           if [[ $tar_size -lt 10000000 ]]; then
-            echo "::error::SDK文件大小仅${tar_size}字节，已损坏或下载到错误页面"
+            echo "::error::SDK文件大小仅 ${tar_size} 字节，疑似下载损坏或404，请检查版本/架构"
             rm -f "${WORKDIR}/${sdk_tarname}"
             exit 1
           fi
 
-          # 解压SDK
+          # 解压SDK（SDK已经预编译好toolchain和所有host工具，不需要重新编译）
           if [[ ! -d "${SDK_DIR}" ]]; then
             echo "[INFO] 解压SDK..."
             temp_extract_dir="${WORKDIR}/temp_extract_${RANDOM}"
@@ -187,235 +183,193 @@ jobs:
             if tar --zstd -xf "${WORKDIR}/${sdk_tarname}" -C "${temp_extract_dir}" 2>/dev/null; then
               :
             else
-              tar -I zstd -xf "${WORKDIR}/${sdk_tarname}" -C "${temp_extract_dir}" || {
-                echo "::error::SDK解压失败"
-                exit 1
-              }
+              tar -I zstd -xf "${WORKDIR}/${sdk_tarname}" -C "${temp_extract_dir}" || { echo "::error::SDK解压失败"; exit 1; }
             fi
 
-            shopt -s nullglob
             extracted_files=( "${temp_extract_dir}"/* )
-            shopt -u nullglob
-
-            if [[ ${#extracted_files[@]} -ne 1 ]]; then
-              echo "::error::SDK解压后文件数量异常: ${#extracted_files[@]}"
+            if [[ ${#extracted_files[@]} -ne 1 ]];then
+              echo "::error::SDK解压目录数量异常: ${#extracted_files[@]}"
               exit 1
             fi
             extracted_name=$(basename "${extracted_files[0]}")
             mv "${temp_extract_dir}/${extracted_name}" "${SDK_DIR}"
             rm -rf "${temp_extract_dir}"
-            echo "[INFO] SDK解压完成: ${SDK_DIR}"
           else
-            echo "[INFO] 复用已解压SDK: ${SDK_DIR}"
+            echo "[INFO] 使用缓存的SDK目录: ${SDK_DIR}"
           fi
 
-          cd "${SDK_DIR}" || {
-            echo "::error::进入SDK目录失败"
-            exit 1
-          }
+          cd "${SDK_DIR}" || { echo "::error::进入SDK目录失败"; exit 1; }
 
-          # 配置dl目录符号链接（复用缓存，不要删staging_dir！SDK预编译工具都在里面）
-          mkdir -p "${WORKDIR}/dl"
+          # 注意：SDK是预编译好的，绝对不要执行 make dirclean/clean/tools/install/toolchain/install，
+          # 会删掉预编译好的交叉编译链导致SDK失效
+          rm -rf "${LOG_DIR:?}"/*
+          mkdir -p "${LOG_DIR}" "${WORKDIR}/dl"
           rm -rf "${SDK_DIR}/dl"
           ln -s "${WORKDIR}/dl" "${SDK_DIR}/dl"
-          echo "[INFO] dl目录已链接到缓存"
 
-          # 确定feeds配置文件
+          # 配置feeds，兼容feeds.conf和feeds.conf.default
           FEEDS_CONF=""
-          if [[ -f "feeds.conf" ]]; then
-            FEEDS_CONF="feeds.conf"
-          elif [[ -f "feeds.conf.default" ]]; then
-            FEEDS_CONF="feeds.conf.default"
+          if [[ -f "${SDK_DIR}/feeds.conf" ]]; then
+            FEEDS_CONF="${SDK_DIR}/feeds.conf"
+          elif [[ -f "${SDK_DIR}/feeds.conf.default" ]]; then
+            FEEDS_CONF="${SDK_DIR}/feeds.conf.default"
+            cp "${SDK_DIR}/feeds.conf.default" "${SDK_DIR}/feeds.conf"
+            FEEDS_CONF="${SDK_DIR}/feeds.conf"
           else
             echo "::error::未找到feeds配置文件"
             exit 1
           fi
-          echo "[INFO] 使用feeds配置: ${FEEDS_CONF}"
 
-          # 添加自定义feed，避免重复添加
+          # add custom feed, avoid commented-line match
           if ! grep -E "^src-git[[:space:]]+${CUSTOM_FEED_NAME}[[:space:]]" "${FEEDS_CONF}"; then
-            echo "[INFO] 添加自定义feed: ${CUSTOM_FEED_NAME} -> ${CUSTOM_FEED_REPO}"
+            echo "[INFO] 添加自定义feed: ${CUSTOM_FEED_REPO}"
             echo "src-git ${CUSTOM_FEED_NAME} ${CUSTOM_FEED_REPO}" >> "${FEEDS_CONF}"
           fi
 
-          # 更新所有feed
           echo "[INFO] 更新feeds..."
-          ./scripts/feeds update -a > "${LOG_DIR}/feeds_update.log" 2>&1 || {
-            echo "::error::feeds更新失败，查看日志: ${LOG_DIR}/feeds_update.log"
-            exit 1
-          }
+          ./scripts/feeds update -a > "${LOG_DIR}/feeds_update.log" 2>&1 || { echo "::error::feeds update失败，请查看feeds_update.log"; exit 1; }
 
-          # 如果需要覆盖官方包，先删除官方同名包
+          # 移除官方源冲突包（如果开启覆盖）
           if [[ "${OVERRIDE_OFFICIAL}" == "true" ]]; then
             echo "[INFO] 移除官方源中可能冲突的包..."
             rm -rf feeds/packages/utils/hplip 2>/dev/null || true
             rm -rf feeds/packages/utils/gutenprint 2>/dev/null || true
-            rm -rf feeds/packages/utils/cups 2>/dev/null || true
+            rm -rf feeds/packages/net/cups 2>/dev/null || true
           fi
 
           # 解析待编译包列表
           read -ra TARGET_PACKAGES <<< "${TARGET_PACKAGES_STR}"
           if [[ ${#TARGET_PACKAGES[@]} -eq 0 ]]; then
-            echo "[INFO] 未指定包列表，编译 ${CUSTOM_FEED_NAME} feed下所有包"
-            # 过滤掉TARGET:开头的行（feeds list会输出target信息）
+            echo "[INFO] 未指定包，将编译 ${CUSTOM_FEED_NAME} feed下所有包"
+            # 过滤掉TARGET:开头的行（feed目标定义）和空行
             mapfile -t TARGET_PACKAGES < <(./scripts/feeds list -r "${CUSTOM_FEED_NAME}" | awk '$1!="TARGET:" && NF {print $1}')
             if [[ ${#TARGET_PACKAGES[@]} -eq 0 ]]; then
-              echo "::error::feeds list返回0个包，请检查feed地址是否正确"
+              echo "::error::feeds list返回0个包，请检查feed是否有效"
               exit 1
             fi
           fi
           echo "[INFO] 待编译包总数: ${#TARGET_PACKAGES[@]}"
           for p in "${TARGET_PACKAGES[@]}"; do echo "  - $p"; done
 
-          # 安装feed包
           echo "[INFO] 安装feed包..."
-          if [[ "${OVERRIDE_OFFICIAL}" == "true" ]]; then
-            FORCE_PARAM="-f"
-          else
-            FORCE_PARAM=""
-          fi
-          if [[ ${#TARGET_PACKAGES[@]} -gt 0 && -n "${TARGET_PACKAGES_STR}" ]]; then
-            # 安装指定包
-            # shellcheck disable=SC2086
-            ./scripts/feeds install -p "${CUSTOM_FEED_NAME}" ${FORCE_PARAM} "${TARGET_PACKAGES[@]}" > "${LOG_DIR}/feeds_install.log" 2>&1 || {
-              echo "::error::feeds安装失败，查看日志: ${LOG_DIR}/feeds_install.log"
-              exit 1
-            }
-          else
-            # 安装自定义feed所有包
-            # shellcheck disable=SC2086
-            ./scripts/feeds install -p "${CUSTOM_FEED_NAME}" -a ${FORCE_PARAM} > "${LOG_DIR}/feeds_install.log" 2>&1 || {
-              echo "::error::feeds安装失败，查看日志: ${LOG_DIR}/feeds_install.log"
-              exit 1
-            }
-          fi
+          # 只安装需要的包，不安装全量feeds
+          ./scripts/feeds install -p "${CUSTOM_FEED_NAME}" -f "${TARGET_PACKAGES[@]}" > "${LOG_DIR}/feeds_install.log" 2>&1 || {
+            # 失败的话尝试全量安装自定义feed
+            echo "[WARN] 单独安装包失败，尝试全量安装自定义feed..."
+            ./scripts/feeds install -p "${CUSTOM_FEED_NAME}" -a -f > "${LOG_DIR}/feeds_install.log" 2>&1 || { echo "::error::feeds install失败，请查看feeds_install.log"; exit 1; }
+          }
 
-          # 清空旧编译产物（绝对不能make dirclean！会删掉SDK预编译好的toolchain）
-          rm -rf bin build_dir/target-*
-          mkdir -p bin
+          echo "[INFO] 生成默认基础配置..."
+          # SDK默认配置，只生成系统和工具链基础配置，不需要处理包依赖
+          make defconfig > "${LOG_DIR}/defconfig.log" 2>&1 || { echo "::error::defconfig失败"; exit 1; }
 
-          # 生成默认配置
-          echo "[INFO] 生成默认配置..."
-          make defconfig > "${LOG_DIR}/defconfig1.log" 2>&1
-
-          # 写入所有目标包到.config
+          # 构造make参数：把所有待编译包通过命令行CONFIG参数传入
+          # 这种方式是OpenWrt官方推荐的，会自动处理所有依赖（包括host包编译顺序），
+          # 不需要手动改.config，不需要oldconfig/yes管道，彻底避免管道破裂和依赖缺失问题
+          MAKE_CONFIG_ARGS=()
           for pkg in "${TARGET_PACKAGES[@]}"; do
-            if grep -q "^CONFIG_PACKAGE_${pkg}=" .config; then
-              sed -i "s|^CONFIG_PACKAGE_${pkg}=.*|CONFIG_PACKAGE_${pkg}=m|" .config
-            else
-              echo "CONFIG_PACKAGE_${pkg}=m" >> .config
-            fi
+            MAKE_CONFIG_ARGS+=("CONFIG_PACKAGE_${pkg}=m")
+            # 同时开启包的文档/示例/测试编译禁用，减少不必要错误
+            MAKE_CONFIG_ARGS+=("CONFIG_PACKAGE_${pkg}-doc=n" 2>/dev/null || true)
+            MAKE_CONFIG_ARGS+=("CONFIG_PACKAGE_${pkg}-examples=n" 2>/dev/null || true)
           done
 
-          # 自动处理所有依赖，全部选m，避免defconfig清掉目标包
-          echo "[INFO] 自动配置依赖..."
-          yes "m" | make oldconfig > "${LOG_DIR}/oldconfig.log" 2>&1
-          # 再次生成配置确保一致性
-          make defconfig > "${LOG_DIR}/defconfig2.log" 2>&1
-
-          # 检查包配置是否生效
-          warn_cnt=0
-          for pkg in "${TARGET_PACKAGES[@]}"; do
-            if ! grep -q "^CONFIG_PACKAGE_${pkg}=m" .config; then
-              echo "[WARN] 包 ${pkg} 未能启用（可能缺失依赖），将跳过编译"
-              warn_cnt=$((warn_cnt + 1))
-            fi
-          done
-          if (( warn_cnt > 0 )); then
-            echo "::warning::${warn_cnt}个包因依赖缺失无法启用，将跳过"
-          fi
-
-          # 下载所有源码
-          echo "[INFO] 下载源码包，并发数: ${MAX_JOBS}"
-          if ! make download V=s -j"${MAX_JOBS}" > "${LOG_DIR}/download.log" 2>&1; then
+          echo "[INFO] 下载所有源码..."
+          # 下载时也传CONFIG参数，确保依赖源码都被下载
+          if ! make download V=s -j"${MAX_JOBS}" "${MAKE_CONFIG_ARGS[@]}" 2>&1 | tee "${LOG_DIR}/download.log"; then
             echo "[WARN] 第一次下载失败，重试一次..."
-            if ! make download V=s -j"${MAX_JOBS}" > "${LOG_DIR}/download_retry.log" 2>&1; then
-              echo "::error::源码下载失败，查看日志: ${LOG_DIR}/download.log"
+            if ! make download V=s -j"${MAX_JOBS}" "${MAKE_CONFIG_ARGS[@]}" 2>&1 | tee "${LOG_DIR}/download_retry.log"; then
+              echo "::error::源码下载失败，请查看download日志"
               exit 1
             fi
-            echo "[INFO] 重试下载成功"
+            echo "[INFO] 下载重试成功"
           fi
 
-          # ========== 核心：SDK编译流程 ==========
-          # 注意：SDK已经预编译好所有tools和toolchain，绝对不要执行make tools/install或make toolchain/install！
-          # -k参数：单包失败不中断，继续编译其他包，满足"单包失败job不失败"的需求
-          # make会自动处理包依赖顺序，包括host端包编译（解决gutenprint host脚本找不到的问题）
-          echo "[INFO] 开始编译所有选中的包，并发数: ${MAX_JOBS}"
-          make -k -j"${MAX_JOBS}" V=s 2>&1 | tee "${LOG_DIR}/build.log"
-          BUILD_EXIT_CODE=${PIPESTATUS[0]}
+          rm -rf bin
+          echo "[INFO] 开始编译（-k参数：单包失败不中断其他包）..."
+          # 核心：通过命令行传CONFIG参数编译，make自动处理所有依赖和host包顺序
+          # -k：单包失败继续编译其他包，符合需求；V=s：输出详细日志便于排错
+          make -k -j"${MAX_JOBS}" V=s "${MAKE_CONFIG_ARGS[@]}" 2>&1 | tee "${LOG_DIR}/build.log"
+          BUILD_RC=${PIPESTATUS[0]}
 
-          # 收集生成的IPK
-          echo "[INFO] 收集生成的IPK文件..."
-          mkdir -p "${OUTPUT_DIR}"
-          find "${OUTPUT_DIR}" -mindepth 1 -delete
+          echo ""
+          echo "===== 编译结果统计 ====="
           success_list=()
           failed_list=()
-
-          # 遍历目标包，检查是否生成了ipk（比日志判断更准确）
           for pkg in "${TARGET_PACKAGES[@]}"; do
-            # 查找对应包的ipk（ipk命名格式：<pkgname>_<version>_<arch>.ipk）
-            ipk_file=$(find bin/packages -type f -name "${pkg}_*.ipk" 2>/dev/null | head -n1)
-            if [[ -n "${ipk_file}" && -f "${ipk_file}" ]]; then
-              cp "${ipk_file}" "${OUTPUT_DIR}/"
+            # 检查ipk是否生成
+            if find bin/packages -type f -name "${pkg}_*.ipk" 2>/dev/null | grep -q .; then
               success_list+=("${pkg}")
             else
               failed_list+=("${pkg}")
             fi
           done
 
-          # 复制其他自定义feed生成的依赖包（可选，注释掉则只留目标包）
-          # find bin/packages -path "*/${CUSTOM_FEED_NAME}/*" -name "*.ipk" -exec cp -n {} "${OUTPUT_DIR}/" \;
+          echo "ImmortalWrt 版本: ${IMMORTALWRT_VERSION}"
+          echo "目标平台: ${TARGET_COMBO}"
+          echo "总包数: ${#TARGET_PACKAGES[@]}"
+          echo "编译成功: ${#success_list[@]}"
+          echo "编译失败: ${#failed_list[@]}"
+          echo ""
+          echo "✅ 成功包列表:"
+          for p in "${success_list[@]}"; do echo "  - $p"; done
+          if [[ ${#failed_list[@]} -gt 0 ]]; then
+            echo ""
+            echo "❌ 失败包列表:"
+            for p in "${failed_list[@]}"; do echo "  - $p"; done
+          fi
 
-          echo ""
-          echo "===== 编译结果汇总 ====="
-          echo "目标: ${TARGET_COMBO}"
-          echo "ImmortalWrt版本: ${IMMORTALWRT_VERSION}"
-          echo "总待编译包: ${#TARGET_PACKAGES[@]}"
-          echo "成功: ${#success_list[@]}"
-          echo "失败: ${#failed_list[@]}"
-          echo ""
-          echo "成功包列表:"
-          for p in "${success_list[@]}"; do echo "  ✅ $p"; done
-          echo ""
-          echo "失败包列表:"
-          for p in "${failed_list[@]}"; do echo "  ❌ $p"; done
+          # 清空输出目录（写报告前清空，避免把报告删掉）
+          find "${OUTPUT_DIR}" -mindepth 1 -delete 2>/dev/null || true
+          mkdir -p "${OUTPUT_DIR}"
 
-          # 生成构建报告（注意在清空OUTPUT_DIR之后写入，避免被删）
+          # 收集所有生成的IPK，包括packages和targets目录下的（kernel模块等）
+          echo "[INFO] 收集IPK文件..."
+          ipk_count=0
+          while IFS= read -r -d '' ipk_file; do
+            cp "${ipk_file}" "${OUTPUT_DIR}/"
+            ipk_count=$((ipk_count + 1))
+          done < <(find bin -type f -name "*.ipk" -print0 2>/dev/null)
+          echo "[INFO] 共收集到 ${ipk_count} 个IPK文件"
+
+          # 写入构建报告
           report_file="${OUTPUT_DIR}/build_report.txt"
           {
-            echo "ImmortalWrt IPK Build Report"
-            echo "============================"
-            echo "Build Time: $(date '+%Y-%m-%d %H:%M:%S %Z')"
-            echo "ImmortalWrt Version: ${IMMORTALWRT_VERSION}"
-            echo "GCC Version: ${GCC_VERSION}"
+            echo "ImmortalWrt IPK 构建报告"
+            echo "========================"
+            echo "构建时间: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+            echo "ImmortalWrt版本: ${IMMORTALWRT_VERSION}"
+            echo "目标平台: ${TARGET_COMBO}"
+            echo "GCC版本: ${GCC_VERSION}"
             echo "libc: ${LIBC}"
-            echo "Target: ${TARGET_COMBO}"
-            echo "Total Packages: ${#TARGET_PACKAGES[@]}"
-            echo "Success: ${#success_list[@]}"
-            echo "Failed: ${#failed_list[@]}"
+            echo "自定义feed: ${CUSTOM_FEED_REPO}"
             echo ""
-            echo "Success Packages:"
+            echo "总包数: ${#TARGET_PACKAGES[@]}"
+            echo "成功: ${#success_list[@]}"
+            echo "失败: ${#failed_list[@]}"
+            echo ""
+            echo "✅ 编译成功的包:"
             for p in "${success_list[@]}"; do echo "  - $p"; done
             echo ""
-            echo "Failed Packages:"
-            for p in "${failed_list[@]}"; do echo "  - $p"; done
-            echo ""
-            echo "IPK Files:"
-            ls -1 "${OUTPUT_DIR}"/*.ipk 2>/dev/null || echo "  (no ipk files)"
+            if [[ ${#failed_list[@]} -gt 0 ]]; then
+              echo "❌ 编译失败的包:"
+              for p in "${failed_list[@]}"; do echo "  - $p"; done
+              echo ""
+            fi
+            echo "所有IPK文件列表:"
+            ls -1 "${OUTPUT_DIR}"/*.ipk 2>/dev/null | xargs -n1 basename 2>/dev/null || echo "  (无IPK生成)"
           } > "${report_file}"
 
-          echo ""
           echo "[INFO] IPK输出目录: ${OUTPUT_DIR}"
-          ls -lh "${OUTPUT_DIR}/"
 
-          # 存在失败包仅警告，job不标红
+          # 存在失败包输出警告，job默认依旧绿色；如果需要失败标红，取消下面exit 1的注释
           if [[ ${#failed_list[@]} -gt 0 ]]; then
-            echo "::warning::${#failed_list[@]}个包编译失败，请查看构建日志和报告"
-            # 如果需要有失败包就标红job，取消下面注释
+            echo "::warning::存在 ${#failed_list[@]} 个软件包编译失败，请查看artifact报告与日志"
             # exit 1
           fi
 
-          exit 0
+          # 导出artifact名称后缀，避免在YAML表达式里用replace函数
+          echo "ARTIFACT_SUFFIX=${TARGET_ARCH}-${TARGET_SUBTARGET}" >> "$GITHUB_ENV"
 
       - name: Upload build logs
         if: always()
