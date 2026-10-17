@@ -19,6 +19,11 @@ on:
           - 'armsr:armv7'
           - 'ramips:mt7621'
           - 'x86:64'
+      target_packages:
+        description: '请输入要编译的软件包名称（以空格分隔）'
+        required: true
+        default: 'cups ghostscript gutenprint foo2zjs splix'
+        type: string
 
 env:
   IMMORTALWRT_VERSION: "24.10.5"
@@ -46,7 +51,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update -y
-          # 【修复核心】补全编译 Kconfig 必需的 flex 和 bison 工具
+          # 补全编译 Kconfig 必需的 flex 和 bison 工具，防止配置工具编译失败
           sudo apt-get install -y --no-install-recommends \
             build-essential clang flex bison g++ gawk \
             libncurses-dev libncursesw5-dev zlib1g-dev \
@@ -109,24 +114,26 @@ jobs:
             rm -rf feeds/packages/utils/hplip
           fi
 
-          # 自动获取第三方仓库中的所有包
-          mapfile -t TARGET_PACKAGES < <(./scripts/feeds list -r "${CUSTOM_FEED_NAME}" | awk '{print $1}')
+          # 获取用户在输入框中指定的包列表
+          USER_INPUT_PACKAGES="${{ github.event.inputs.target_packages }}"
+          read -r -a TARGET_PACKAGES <<< "${USER_INPUT_PACKAGES}"
           
           if [ ${#TARGET_PACKAGES[@]} -eq 0 ]; then
-            echo "[FATAL] 未能获取到任何包" && exit 1
+            echo "[FATAL] 未指定任何需要编译的软件包" && exit 1
           fi
 
-          echo "[INFO] 已成功锁定 ${#TARGET_PACKAGES[@]} 个编译目标包。"
+          echo "[INFO] 已成功锁定 ${#TARGET_PACKAGES[@]} 个自定义编译目标包: ${TARGET_PACKAGES[*]}"
           
           echo "TARGET_PACKAGES_STR=${TARGET_PACKAGES[*]}" >> $GITHUB_ENV
 
-          # 运行 defconfig，如果失败则自动打印详细日志用于排查
+          # 运行 defconfig
           make defconfig || {
             echo "[ERROR] make defconfig 失败，正在输出详细日志..."
             make defconfig -j1 V=s
             exit 1
           }
 
+          # 仅启用水印/指定的自定义包
           for pkg in "${TARGET_PACKAGES[@]}"; do
             echo "CONFIG_PACKAGE_${pkg}=m" >> .config
           done
@@ -158,6 +165,7 @@ jobs:
           SUCCESS_LIST=()
           FAILED_LIST=()
 
+          # 临时关闭 errexit，确保单包编译失败不影响后续包的构建
           set +e
 
           for pkg in "${TARGET_PACKAGES[@]}"; do
@@ -166,6 +174,7 @@ jobs:
             echo ">>> [开始编译] 软件包: ${pkg}"
             echo "--------------------------------------------------"
 
+            # 重定向日志到文件，控制台保持干净
             make "package/${pkg}/compile" -j"${JOBS}" > "build_${pkg}.log" 2>&1
             BUILD_STATUS=$?
 
