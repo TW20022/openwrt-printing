@@ -46,13 +46,13 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update -y
+          # 【修复核心】补全编译 Kconfig 必需的 flex 和 bison 工具
           sudo apt-get install -y --no-install-recommends \
-            build-essential libncurses-dev libncursesw5-dev zlib1g-dev gawk \
+            build-essential clang flex bison g++ gawk \
+            libncurses-dev libncursesw5-dev zlib1g-dev \
             git gettext libssl-dev xsltproc wget unzip libelf-dev \
             python3 python3-setuptools python3-dev perl zstd rsync ca-certificates file \
-            time diffutils subversion mercurial patchelf libgmp-dev libmpc-dev \
-            libxml2-utils libmpfr-dev libsane-dev libsnmp-dev ghostscript \
-            bison flex
+            time diffutils subversion mercurial patchelf libgmp-dev libmpc-dev libxml2-utils libmpfr-dev libsane-dev libsnmp-dev ghostscript
 
       - name: Prepare Build Environment & SDK
         run: |
@@ -102,6 +102,7 @@ jobs:
           fi
 
           ./scripts/feeds update -a
+          ./scripts/feeds install -a
 
           if [ -d feeds/packages/utils/hplip ]; then
             echo "[INFO] 移除官方 hplip"
@@ -117,27 +118,34 @@ jobs:
 
           echo "[INFO] 已成功锁定 ${#TARGET_PACKAGES[@]} 个编译目标包。"
           
-          # 将包列表存入环境变量以便下一步读取
           echo "TARGET_PACKAGES_STR=${TARGET_PACKAGES[*]}" >> $GITHUB_ENV
 
-          ./scripts/feeds install -p "${CUSTOM_FEED_NAME}" -a -f
+          # 运行 defconfig，如果失败则自动打印详细日志用于排查
+          make defconfig || {
+            echo "[ERROR] make defconfig 失败，正在输出详细日志..."
+            make defconfig -j1 V=s
+            exit 1
+          }
 
-          make defconfig
           for pkg in "${TARGET_PACKAGES[@]}"; do
             echo "CONFIG_PACKAGE_${pkg}=m" >> .config
           done
-          make defconfig
+
+          make defconfig || {
+            echo "[ERROR] 二次 make defconfig 失败，正在输出详细日志..."
+            make defconfig -j1 V=s
+            exit 1
+          }
 
       - name: Compile Packages
         run: |
           cd "${SDK_DIR}"
           JOBS=$(nproc)
           
-          # 从环境变量恢复数组
           read -r -a TARGET_PACKAGES <<< "${TARGET_PACKAGES_STR}"
 
           echo "=================================================="
-          echo " 准备开始编译, 本次共有 ${#TARGET_PACKAGES[@]} 个软件包待编译："
+          echo " 准备开始编译，本次共有 ${#TARGET_PACKAGES[@]} 个软件包待编译："
           echo "=================================================="
           for i in "${!TARGET_PACKAGES[@]}"; do
             echo "  $((i+1)). ${TARGET_PACKAGES[$i]}"
@@ -150,7 +158,6 @@ jobs:
           SUCCESS_LIST=()
           FAILED_LIST=()
 
-          # 临时关闭 errexit，确保单包失败不影响后续包编译
           set +e
 
           for pkg in "${TARGET_PACKAGES[@]}"; do
@@ -159,7 +166,6 @@ jobs:
             echo ">>> [开始编译] 软件包: ${pkg}"
             echo "--------------------------------------------------"
 
-            # 重定向日志到文件，控制台保持干净
             make "package/${pkg}/compile" -j"${JOBS}" > "build_${pkg}.log" 2>&1
             BUILD_STATUS=$?
 
@@ -175,7 +181,6 @@ jobs:
             fi
           done
 
-          # 恢复默认设置
           set -e
 
           echo ""
