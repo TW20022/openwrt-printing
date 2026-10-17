@@ -51,7 +51,7 @@ jobs:
       - name: Install Dependencies
         run: |
           sudo apt-get update -y
-          # 补全编译 Kconfig 必需的 flex 和 bison 工具，防止配置工具编译失败
+          # 补全编译 Kconfig 必需的 flex 和 bison 工具
           sudo apt-get install -y --no-install-recommends \
             build-essential clang flex bison g++ gawk \
             libncurses-dev libncursesw5-dev zlib1g-dev \
@@ -98,6 +98,9 @@ jobs:
         run: |
           cd "${SDK_DIR}"
           
+          # 【核心修复】清除可能污染 OpenWrt make 系统的环境变量
+          unset TARGET_ARCH TARGET_SUBTARGET ARCH SUBTARGET
+
           mkdir -p "${WORKDIR}/dl"
           rm -rf dl
           ln -s "${WORKDIR}/dl" dl
@@ -114,7 +117,6 @@ jobs:
             rm -rf feeds/packages/utils/hplip
           fi
 
-          # 获取用户在输入框中指定的包列表
           USER_INPUT_PACKAGES="${{ github.event.inputs.target_packages }}"
           read -r -a TARGET_PACKAGES <<< "${USER_INPUT_PACKAGES}"
           
@@ -126,14 +128,12 @@ jobs:
           
           echo "TARGET_PACKAGES_STR=${TARGET_PACKAGES[*]}" >> $GITHUB_ENV
 
-          # 运行 defconfig
           make defconfig || {
             echo "[ERROR] make defconfig 失败，正在输出详细日志..."
             make defconfig -j1 V=s
             exit 1
           }
 
-          # 仅启用水印/指定的自定义包
           for pkg in "${TARGET_PACKAGES[@]}"; do
             echo "CONFIG_PACKAGE_${pkg}=m" >> .config
           done
@@ -147,8 +147,11 @@ jobs:
       - name: Compile Packages
         run: |
           cd "${SDK_DIR}"
-          JOBS=$(nproc)
           
+          # 【核心修复】再次清除可能污染环境变量的变量
+          unset TARGET_ARCH TARGET_SUBTARGET ARCH SUBTARGET
+
+          JOBS=$(nproc)
           read -r -a TARGET_PACKAGES <<< "${TARGET_PACKAGES_STR}"
 
           echo "=================================================="
@@ -165,7 +168,6 @@ jobs:
           SUCCESS_LIST=()
           FAILED_LIST=()
 
-          # 临时关闭 errexit，确保单包编译失败不影响后续包的构建
           set +e
 
           for pkg in "${TARGET_PACKAGES[@]}"; do
@@ -174,7 +176,6 @@ jobs:
             echo ">>> [开始编译] 软件包: ${pkg}"
             echo "--------------------------------------------------"
 
-            # 重定向日志到文件，控制台保持干净
             make "package/${pkg}/compile" -j"${JOBS}" > "build_${pkg}.log" 2>&1
             BUILD_STATUS=$?
 
