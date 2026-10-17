@@ -21,7 +21,7 @@ on:
           - 'x86:64'
 
 env:
-  IMMORTALWRT_VERSION: "24.10.4"
+  IMMORTALWRT_VERSION: "24.10.5"
   GCC_VERSION: "13.3.0"
   LIBC: "musl"
   CUSTOM_FEED_REPO: "https://github.com/TW20022/openwrt-24-printing-packages.git"
