@@ -14,7 +14,7 @@ jobs:
     - name: Install dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential gawk flex git wget unzip python3 python3-pip python3-setuptools python3-wheel zstd
+        sudo apt-get install -y build-essential libncurses5-dev gawk flex git gettext libssl-dev xsltproc zlib1g-dev ecj libelf-dev wget unzip python3 python3-pip python3-setuptools python3-wheel python3-distutils zstd
 
     - name: Download and extract SDK
       run: |
@@ -26,15 +26,18 @@ jobs:
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
-        echo "src-git printing https://github.com/TW20022/openwrt-24-printing-packages.git" >> feeds.conf
+        echo "src-git printing https://github.com/master-0123/openwrt-printing-packages.git" >> feeds.conf
         ./scripts/feeds update -a 
         ./scripts/feeds install -a
 
         # 精简 .config
         cat > .config <<'EOF'
-        CONFIG_PACKAGE_foo2zjs=y
+        CONFIG_TARGET_armsr=y
+        CONFIG_TARGET_armsr_armv8=y
+        CONFIG_TARGET_armsr_armv8_Generic=y
         CONFIG_PACKAGE_gutenprint=y
-        CONFIG_PACKAGE_splix=y  
+        CONFIG_PACKAGE_cups=y
+        CONFIG_PACKAGE_ghostscript=y
         EOF
 
         make defconfig >/dev/null
@@ -49,9 +52,9 @@ jobs:
       run: |
         cd openwrt-sdk
         echo "=== Start building printing packages ==="
-        make package/foo2zjs/compile -j1 V=sc
+        make package/cups/compile -j1 V=sc
+        make package/ghostscript/compile -j1 V=sc
         make package/gutenprint/compile -j1 V=sc
-        make package/splix/compile -j1 V=sc
         echo "=== Build finished ==="
 
     - name: List generated IPK files
