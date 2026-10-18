@@ -26,7 +26,7 @@ jobs:
       run: |
         cd openwrt-sdk
         cp feeds.conf.default feeds.conf
-        echo "src-git printing https://github.com/master-0123/openwrt-printing-packages.git" >> feeds.conf
+        echo "src-git printing https://github.com/TW20022/openwrt-24-printing-packages.git" >> feeds.conf
         ./scripts/feeds update -a 
         ./scripts/feeds install -a
 
@@ -50,7 +50,7 @@ jobs:
       run: |
         cd openwrt-sdk
         echo "=== Start building printing packages ==="
-        make package/gutenprint/compile -j1 V=sc
+        make package/gutenprint/compile -j$(nproc)
         echo "=== Build finished ==="
 
     - name: List generated IPK files
