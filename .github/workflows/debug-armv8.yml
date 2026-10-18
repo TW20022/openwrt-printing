@@ -36,8 +36,6 @@ jobs:
         CONFIG_TARGET_armsr_armv8=y
         CONFIG_TARGET_armsr_armv8_Generic=y
         CONFIG_PACKAGE_gutenprint=y
-        CONFIG_PACKAGE_cups=y
-        CONFIG_PACKAGE_ghostscript=y
         EOF
 
         make defconfig >/dev/null
@@ -52,8 +50,6 @@ jobs:
       run: |
         cd openwrt-sdk
         echo "=== Start building printing packages ==="
-        make package/cups/compile -j1 V=sc
-        make package/ghostscript/compile -j1 V=sc
         make package/gutenprint/compile -j1 V=sc
         echo "=== Build finished ==="
 
