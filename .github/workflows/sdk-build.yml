@@ -1,4 +1,4 @@
-name: SDK Build 
+name: SDK Compile Workflow
 
 on:
   workflow_dispatch:
@@ -11,7 +11,7 @@ on:
       target_combo:
         description: "Target/Subtarget"
         required: true
-        default: "ramips:mt7621"
+        default: "qualcommax:ipq807x"
         type: choice
         options:
           - "qualcommax:ipq807x"
@@ -46,7 +46,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 240
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
@@ -75,18 +75,17 @@ jobs:
           WORKDIR="${{ github.workspace }}/immortalwrt_build"
           OUTPUT_DIR="${{ github.workspace }}/ipk_output"
 
-          if [[ "$VERSION" =~ ^snapshot ]]; then
-            BASE_URL="https://downloads.immortalwrt.org/snapshots/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}"
-          else
-            BASE_URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}"
-          fi
+          case "$VERSION" in
+            snapshot*)
+              BASE_URL="https://downloads.immortalwrt.org/snapshots/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}"
+              ;;
+            *)
+              BASE_URL="https://downloads.immortaltwrt.org/releases/${VERSION}/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}"
+              ;;
+          esac
 
           PAGE=$(curl -fsSL "${BASE_URL}/")
-          SDK_TARNAME=$(
-            echo "$PAGE" \
-              | grep -oE 'immortalwrt-sdk[^"]+\.tar\.zst' \
-              | head -n1
-          )
+          SDK_TARNAME=$(echo "$PAGE" | grep -oE 'immortalwrt-sdk[^"]+\.tar\.zst' | head -n1)
 
           if [ -z "$SDK_TARNAME" ]; then
             echo "[FATAL] Unable to locate SDK"
@@ -173,7 +172,7 @@ jobs:
           if [ "${#PKGS[@]}" -eq 0 ]; then
             echo "[ERROR] No packages specified"
             exit 1
-          }
+          fi
 
           echo "TARGET_PACKAGES_STR=${PKGS[*]}" >> $GITHUB_ENV
           make defconfig
@@ -193,7 +192,7 @@ jobs:
           done
 
       - name: Compile Packages
-        timeout-minutes: 200
+        timeout-minutes: 120
         run: |
           cd "${{ env.SDK_DIR }}"
           JOBS=$(nproc)
