@@ -6,20 +6,29 @@ on:
       openwrt_version:
         description: "OpenWrt Version"
         required: true
-        default: "25.12.6"
+        default: "24.10.8"
         type: choice
         options:
           - "24.10.8"
           - "25.12.6"
           - "snapshot"
       custom_version:
-        description: "Custom Version"
+        description: "Custom OpenWrt Version (optional)"
         required: false
         default: ""
       target_combo:
-        description: "target:subtarget"
+        description: "Target:Subtarget"
         required: true
         default: "qualcommax:ipq807x"
+        type: choice
+        options:
+          - "qualcommax:ipq807x"
+          - "airoha:an7581"
+          - "airoha:an7583"
+          - "mediatek:filogic"
+          - "armsr:armv8"
+          - "ramips:mt7621"
+          - "x86:64"
       target_packages:
         description: "Packages separated by spaces (dependencies first)"
         required: true
