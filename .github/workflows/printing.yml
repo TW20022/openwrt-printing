@@ -19,7 +19,7 @@ on:
       target_combo:
         description: "Target:Subtarget"
         required: true
-        default: "qualcommax:ipq807x"
+        default: "ramips:mt7621"
         type: choice
         options:
           - "qualcommax:ipq807x"
@@ -32,7 +32,7 @@ on:
       target_packages:
         description: "Packages separated by spaces (dependencies first)"
         required: true
-        default: "cups cups-filters ghostscript gutenprint poppler brlaser qpdf"
+        default: "cups cups-filters ghostscript gutenprint foo2zjs brlaser splix"
 
 env:
   CUSTOM_FEED_REPO: https://github.com/TW20022/openwrt-24-printing-packages.git
