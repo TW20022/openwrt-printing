@@ -1,4 +1,4 @@
-name: Build Printing Packages
+name: Build OpenWrt Printing Packages
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       openwrt_version:
         description: "OpenWrt Version"
         required: true
-        default: "24.10.8"
+        default: "25.12.6"
         type: choice
         options:
           - "24.10.8"
@@ -19,10 +19,10 @@ on:
       target_combo:
         description: "Target:Subtarget"
         required: true
-        default: "ramips:mt7621"
+        default: "qualcommax:ipq807x"
         type: choice
         options:
-          - "qualcommax:ipq807x"
+          - "ramips:mt7621"
           - "airoha:an7581"
           - "airoha:an7583"
           - "mediatek:filogic"
@@ -30,7 +30,7 @@ on:
           - "ramips:mt7621"
           - "x86:64"
       target_packages:
-        description: "Packages separated by spaces (dependencies first)"
+        description: "Packages separated by spaces"
         required: true
         default: "cups cups-filters ghostscript gutenprint foo2zjs brlaser splix"
 
@@ -156,28 +156,39 @@ jobs:
       - name: Build Packages
         run: |
           cd openwrt
+          set +e
           SUCCESS_LIST=""
           FAILED_LIST=""
+          
           for pkg in ${{ github.event.inputs.target_packages }}
           do
             echo
             echo "======================================="
             echo "Building package: $pkg"
             echo "======================================="
-            make package/$pkg/compile \
-              -j$(nproc) \
-              V=s \
-              > build-${pkg}.log 2>&1
-            if [ $? -eq 0 ]; then
+            
+            # 1. 尝试多线程并行编译
+            make package/$pkg/compile -j$(nproc) V=s > build-${pkg}.log 2>&1
+            BUILD_STATUS=$?
+            
+            # 2. 如果多线程失败，尝试单线程 V=s 降级重试
+            if [ $BUILD_STATUS -ne 0 ]; then
+              echo "Parallel build failed for $pkg, retrying with single thread (-j1)..."
+              make package/$pkg/compile -j1 V=s > build-${pkg}.log 2>&1
+              BUILD_STATUS=$?
+            fi
+            
+            # 3. 统计结果
+            if [ $BUILD_STATUS -eq 0 ]; then
               SUCCESS_LIST="${SUCCESS_LIST} ${pkg}"
+              echo "SUCCESS: $pkg"
             else
               FAILED_LIST="${FAILED_LIST} ${pkg}"
-              echo
               echo "FAILED: $pkg"
-              echo
               tail -100 build-${pkg}.log
             fi
           done
+          
           echo "SUCCESS_LIST=${SUCCESS_LIST}" >> $GITHUB_ENV
           echo "FAILED_LIST=${FAILED_LIST}" >> $GITHUB_ENV
 
