@@ -1,4 +1,4 @@
-name: SDK Compile Workflow
+name: SDK Compile
 
 on:
   workflow_dispatch:
@@ -80,7 +80,7 @@ jobs:
               BASE_URL="https://downloads.immortalwrt.org/snapshots/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}"
               ;;
             *)
-              BASE_URL="https://downloads.immortaltwrt.org/releases/${VERSION}/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}"
+              BASE_URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}"
               ;;
           esac
 
