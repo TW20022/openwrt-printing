@@ -1,0 +1,276 @@
+name: SDK Build 
+
+on:
+  workflow_dispatch:
+    inputs:
+      immortalwrt_version:
+        description: "ImmortalWrt Version"
+        required: true
+        default: "24.10.6"
+        type: string
+      target_combo:
+        description: "Target/Subtarget"
+        required: true
+        default: "ramips:mt7621"
+        type: choice
+        options:
+          - "qualcommax:ipq807x"
+          - "qualcommax:ipq50xx"
+          - "qualcommax:ipq60xx"
+          - "airoha:an7581"
+          - "airoha:an7583"
+          - "mediatek:filogic"
+          - "armsr:armv8"
+          - "armsr:armv7"
+          - "ramips:mt7621"
+          - "x86:64"
+      target_packages:
+        description: "Packages (space separated)"
+        required: true
+        default: "cups ghostscript gutenprint foo2zjs splix"
+        type: string
+
+env:
+  LIBC: musl
+  CUSTOM_FEED_NAME: printing
+  CUSTOM_FEED_REPO: https://github.com/TW20022/openwrt-24-printing-packages.git
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ipk-${{ github.event.inputs.target_combo }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison g++ gawk \
+            libncurses-dev libncursesw5-dev \
+            zlib1g-dev git gettext libssl-dev \
+            xsltproc wget unzip libelf-dev \
+            python3 python3-dev python3-setuptools \
+            perl zstd rsync ca-certificates curl \
+            file time diffutils subversion mercurial \
+            patchelf libgmp-dev libmpc-dev \
+            libxml2-utils libmpfr-dev
+
+      - name: Prepare Environment & Discover SDK URL
+        run: |
+          TARGET_COMBO="${{ github.event.inputs.target_combo }}"
+          TARGET_ARCH="${TARGET_COMBO%%:*}"
+          TARGET_SUBTARGET="${TARGET_COMBO#*:}"
+          VERSION="${{ github.event.inputs.immortalwrt_version }}"
+          WORKDIR="${{ github.workspace }}/immortalwrt_build"
+          OUTPUT_DIR="${{ github.workspace }}/ipk_output"
+
+          if [[ "$VERSION" =~ ^snapshot ]]; then
+            BASE_URL="https://downloads.immortalwrt.org/snapshots/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}"
+          else
+            BASE_URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}"
+          fi
+
+          PAGE=$(curl -fsSL "${BASE_URL}/")
+          SDK_TARNAME=$(
+            echo "$PAGE" \
+              | grep -oE 'immortalwrt-sdk[^"]+\.tar\.zst' \
+              | head -n1
+          )
+
+          if [ -z "$SDK_TARNAME" ]; then
+            echo "[FATAL] Unable to locate SDK"
+            exit 1
+          fi
+
+          SDK_URL="${BASE_URL}/${SDK_TARNAME}"
+          SDK_DIR="${WORKDIR}/sdk-${TARGET_ARCH}-${TARGET_SUBTARGET}"
+
+          echo "TARGET_ARCH=${TARGET_ARCH}" >> $GITHUB_ENV
+          echo "TARGET_SUBTARGET=${TARGET_SUBTARGET}" >> $GITHUB_ENV
+          echo "IMMORTALWRT_VERSION=${VERSION}" >> $GITHUB_ENV
+          echo "WORKDIR=${WORKDIR}" >> $GITHUB_ENV
+          echo "OUTPUT_DIR=${OUTPUT_DIR}" >> $GITHUB_ENV
+          echo "SDK_DIR=${SDK_DIR}" >> $GITHUB_ENV
+          echo "SDK_TARNAME=${SDK_TARNAME}" >> $GITHUB_ENV
+          echo "SDK_URL=${SDK_URL}" >> $GITHUB_ENV
+
+          mkdir -p "${WORKDIR}"
+          mkdir -p "${OUTPUT_DIR}"
+
+          echo "SDK URL: ${SDK_URL}"
+
+      - name: Cache SDK & Downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ env.WORKDIR }}/${{ env.SDK_TARNAME }}
+            ${{ env.WORKDIR }}/dl
+          key: sdk-${{ env.IMMORTALWRT_VERSION }}-${{ github.event.inputs.target_combo }}-${{ env.SDK_TARNAME }}
+          restore-keys: |
+            sdk-${{ env.IMMORTALWRT_VERSION }}-${{ github.event.inputs.target_combo }}-
+
+      - name: Download SDK
+        run: |
+          if [ ! -f "${{ env.WORKDIR }}/${{ env.SDK_TARNAME }}" ]; then
+            echo "[INFO] Downloading SDK..."
+            wget \
+              -q \
+              --show-progress \
+              -O "${{ env.WORKDIR }}/${{ env.SDK_TARNAME }}" \
+              "${{ env.SDK_URL }}"
+          else
+            echo "[INFO] SDK cache hit"
+          fi
+
+      - name: Extract SDK
+        run: |
+          SDK_DIR="${{ env.SDK_DIR }}"
+          if [ -d "${SDK_DIR}" ]; then
+            echo "[INFO] SDK already extracted"
+            exit 0
+          fi
+          TMP_DIR=$(mktemp -d)
+          tar \
+            --zstd \
+            -xf "${{ env.WORKDIR }}/${{ env.SDK_TARNAME }}" \
+            -C "${TMP_DIR}"
+          EXTRACTED_DIR=$(find "${TMP_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n1)
+          mv "${EXTRACTED_DIR}" "${SDK_DIR}"
+          rm -rf "${TMP_DIR}"
+
+      - name: Configure SDK
+        run: |
+          cd "${{ env.SDK_DIR }}"
+          mkdir -p "${{ env.WORKDIR }}/dl"
+          rm -rf dl
+          ln -sf "${{ env.WORKDIR }}/dl" dl
+
+          if ! grep -q "^src-git ${{ env.CUSTOM_FEED_NAME }}" feeds.conf.default; then
+            echo "src-git ${{ env.CUSTOM_FEED_NAME }} ${{ env.CUSTOM_FEED_REPO }}" \
+              >> feeds.conf.default
+          fi
+
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+          if [ -d feeds/packages/utils/hplip ]; then
+            rm -rf feeds/packages/utils/hplip
+          fi
+
+          USER_INPUT="${{ github.event.inputs.target_packages }}"
+          read -ra PKGS <<< "$USER_INPUT"
+          if [ "${#PKGS[@]}" -eq 0 ]; then
+            echo "[ERROR] No packages specified"
+            exit 1
+          }
+
+          echo "TARGET_PACKAGES_STR=${PKGS[*]}" >> $GITHUB_ENV
+          make defconfig
+          for pkg in "${PKGS[@]}"; do
+            echo "CONFIG_PACKAGE_${pkg}=m" >> .config
+          done
+          make defconfig
+
+      - name: Download Sources
+        run: |
+          cd "${{ env.SDK_DIR }}"
+          JOBS=$(nproc)
+          for i in 1 2 3; do
+            make download -j"${JOBS}" && break
+            echo "Retry $i..."
+            sleep 10
+          done
+
+      - name: Compile Packages
+        timeout-minutes: 200
+        run: |
+          cd "${{ env.SDK_DIR }}"
+          JOBS=$(nproc)
+          read -ra PKGS <<< "${TARGET_PACKAGES_STR}"
+          SUCCESS_LIST=()
+          FAILED_LIST=()
+          mkdir -p logs
+
+          set +e
+          for pkg in "${PKGS[@]}"; do
+            echo "====================================="
+            echo "Building: ${pkg}"
+            echo "====================================="
+            
+            make package/${pkg}/compile -j"${JOBS}" > logs/${pkg}.log 2>&1
+            if [ $? -eq 0 ]; then
+              SUCCESS_LIST+=("${pkg}")
+              echo "[SUCCESS] ${pkg}"
+            else
+              FAILED_LIST+=("${pkg}")
+              echo "[FAILED] ${pkg}, retrying with V=s for details..."
+              make package/${pkg}/compile -j1 V=s >> logs/${pkg}.log 2>&1
+              echo ""
+              echo "Last 50 lines:"
+              tail -n 50 logs/${pkg}.log
+            fi
+          done
+          set -e
+
+          {
+            echo "# ImmortalWrt Build Report"
+            echo ""
+            echo "## Target"
+            echo "${{ github.event.inputs.target_combo }}"
+            echo ""
+            echo "## Version"
+            echo "${{ github.event.inputs.immortalwrt_version }}"
+            echo ""
+            echo "## Success"
+            for p in "${SUCCESS_LIST[@]}"; do
+              echo "- ${p}"
+            done
+            echo ""
+            echo "## Failed"
+            for p in "${FAILED_LIST[@]}"; do
+              echo "- ${p}"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ ${#SUCCESS_LIST[@]} -eq 0 ]; then
+            echo "[FATAL] All packages failed"
+            exit 1
+          fi
+
+      - name: Collect IPKs
+        run: |
+          cd "${{ env.SDK_DIR }}"
+          mkdir -p "${{ env.OUTPUT_DIR }}"
+          find bin/packages \
+            -type f \
+            -name "*.ipk" \
+            -exec cp -f {} "${{ env.OUTPUT_DIR }}/" \;
+          echo "Collected files:"
+          ls -lh "${{ env.OUTPUT_DIR }}"
+
+      - name: Upload IPKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipk-${{ github.event.inputs.target_combo }}-${{ github.event.inputs.immortalwrt_version }}
+          path: |
+            ${{ env.OUTPUT_DIR }}/*.ipk
+          if-no-files-found: error
+
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            ${{ env.SDK_DIR }}/logs
