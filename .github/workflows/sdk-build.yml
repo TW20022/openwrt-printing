@@ -1,275 +1,243 @@
-name: SDK Compile
+name: Build OpenWrt Printing Packages (SDK Tree)
 
 on:
   workflow_dispatch:
     inputs:
-      immortalwrt_version:
-        description: "ImmortalWrt Version"
+      openwrt_version:
+        description: "OpenWrt Version"
         required: true
-        default: "24.10.6"
-        type: string
+        default: "24.10.8"
+        type: choice
+        options:
+          - "24.10.8"
+          - "25.12.6"
+          - "snapshot"
+      custom_version:
+        description: "Custom OpenWrt Version (optional)"
+        required: false
+        default: ""
       target_combo:
-        description: "Target/Subtarget"
+        description: "Target:Subtarget"
         required: true
         default: "qualcommax:ipq807x"
         type: choice
         options:
           - "qualcommax:ipq807x"
-          - "qualcommax:ipq50xx"
-          - "qualcommax:ipq60xx"
           - "airoha:an7581"
           - "airoha:an7583"
           - "mediatek:filogic"
           - "armsr:armv8"
-          - "armsr:armv7"
           - "ramips:mt7621"
           - "x86:64"
       target_packages:
-        description: "Packages (space separated)"
+        description: "Packages separated by spaces (dependencies first)"
         required: true
-        default: "cups ghostscript gutenprint foo2zjs splix"
-        type: string
+        default: "cups cups-filters ghostscript gutenprint foo2zjs brlaser splix"
 
 env:
-  LIBC: musl
-  CUSTOM_FEED_NAME: printing
   CUSTOM_FEED_REPO: https://github.com/TW20022/openwrt-24-printing-packages.git
-
-defaults:
-  run:
-    shell: bash
-
-concurrency:
-  group: ipk-${{ github.event.inputs.target_combo }}
-  cancel-in-progress: true
+  OUTPUT_DIR: output
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 180
-
     steps:
-      - name: Checkout
+      - name: Checkout Workflow Repository
         uses: actions/checkout@v4
 
-      - name: Install Dependencies
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential clang flex bison g++ gawk \
-            libncurses-dev libncursesw5-dev \
-            zlib1g-dev git gettext libssl-dev \
-            xsltproc wget unzip libelf-dev \
-            python3 python3-dev python3-setuptools \
-            perl zstd rsync ca-certificates curl \
-            file time diffutils subversion mercurial \
-            patchelf libgmp-dev libmpc-dev \
-            libxml2-utils libmpfr-dev
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential ccache cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext git gperf help2man intltool jq libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz ninja-build p7zip-full patch pkgconf python3 python3-pip rsync scons squashfs-tools subversion swig texinfo uglifyjs unzip wget xxd zlib1g-dev
 
-      - name: Prepare Environment & Discover SDK URL
+      - name: Resolve Version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.custom_version }}" ]; then
+            echo "version=${{ github.event.inputs.custom_version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ github.event.inputs.openwrt_version }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Parse Target
         run: |
           TARGET_COMBO="${{ github.event.inputs.target_combo }}"
-          TARGET_ARCH="${TARGET_COMBO%%:*}"
-          TARGET_SUBTARGET="${TARGET_COMBO#*:}"
-          VERSION="${{ github.event.inputs.immortalwrt_version }}"
-          WORKDIR="${{ github.workspace }}/immortalwrt_build"
-          OUTPUT_DIR="${{ github.workspace }}/ipk_output"
+          TARGET="${TARGET_COMBO%%:*}"
+          SUBTARGET="${TARGET_COMBO#*:}"
+          echo "TARGET=${TARGET}" >> $GITHUB_ENV
+          echo "SUBTARGET=${SUBTARGET}" >> $GITHUB_ENV
 
-          case "$VERSION" in
-            snapshot*)
-              BASE_URL="https://downloads.immortalwrt.org/snapshots/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}"
-              ;;
-            *)
-              BASE_URL="https://downloads.immortalwrt.org/releases/${VERSION}/targets/${TARGET_ARCH}/${TARGET_SUBTARGET}"
-              ;;
-          esac
-
-          PAGE=$(curl -fsSL "${BASE_URL}/")
-          SDK_TARNAME=$(echo "$PAGE" | grep -oE 'immortalwrt-sdk[^"]+\.tar\.zst' | head -n1)
-
-          if [ -z "$SDK_TARNAME" ]; then
-            echo "[FATAL] Unable to locate SDK"
-            exit 1
+      - name: Clone OpenWrt
+        run: |
+          git clone https://github.com/openwrt/openwrt.git openwrt
+          cd openwrt
+          VERSION="${{ steps.version.outputs.version }}"
+          if [ "$VERSION" = "snapshot" ]; then
+            echo "Using OpenWrt master branch"
+          else
+            git fetch --tags
+            if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+              git checkout "v${VERSION}"
+            else
+              echo "::error::Tag v${VERSION} not found"
+              exit 1
+            fi
           fi
 
-          SDK_URL="${BASE_URL}/${SDK_TARNAME}"
-          SDK_DIR="${WORKDIR}/sdk-${TARGET_ARCH}-${TARGET_SUBTARGET}"
-
-          echo "TARGET_ARCH=${TARGET_ARCH}" >> $GITHUB_ENV
-          echo "TARGET_SUBTARGET=${TARGET_SUBTARGET}" >> $GITHUB_ENV
-          echo "IMMORTALWRT_VERSION=${VERSION}" >> $GITHUB_ENV
-          echo "WORKDIR=${WORKDIR}" >> $GITHUB_ENV
-          echo "OUTPUT_DIR=${OUTPUT_DIR}" >> $GITHUB_ENV
-          echo "SDK_DIR=${SDK_DIR}" >> $GITHUB_ENV
-          echo "SDK_TARNAME=${SDK_TARNAME}" >> $GITHUB_ENV
-          echo "SDK_URL=${SDK_URL}" >> $GITHUB_ENV
-
-          mkdir -p "${WORKDIR}"
-          mkdir -p "${OUTPUT_DIR}"
-
-          echo "SDK URL: ${SDK_URL}"
-
-      - name: Cache SDK & Downloads
+      - name: Cache dl
         uses: actions/cache@v4
         with:
-          path: |
-            ${{ env.WORKDIR }}/${{ env.SDK_TARNAME }}
-            ${{ env.WORKDIR }}/dl
-          key: sdk-${{ env.IMMORTALWRT_VERSION }}-${{ github.event.inputs.target_combo }}-${{ env.SDK_TARNAME }}
-          restore-keys: |
-            sdk-${{ env.IMMORTALWRT_VERSION }}-${{ github.event.inputs.target_combo }}-
+          path: openwrt/dl
+          key: sdk-dl-${{ steps.version.outputs.version }}
 
-      - name: Download SDK
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: sdk-ccache-${{ github.event.inputs.target_combo }}
+
+      - name: Add Printing Feed
         run: |
-          if [ ! -f "${{ env.WORKDIR }}/${{ env.SDK_TARNAME }}" ]; then
-            echo "[INFO] Downloading SDK..."
-            wget \
-              -q \
-              --show-progress \
-              -O "${{ env.WORKDIR }}/${{ env.SDK_TARNAME }}" \
-              "${{ env.SDK_URL }}"
-          else
-            echo "[INFO] SDK cache hit"
-          fi
+          cd openwrt
+          echo "" >> feeds.conf.default
+          echo "src-git printing ${CUSTOM_FEED_REPO}" >> feeds.conf.default
 
-      - name: Extract SDK
+      - name: Update Feeds
         run: |
-          SDK_DIR="${{ env.SDK_DIR }}"
-          if [ -d "${SDK_DIR}" ]; then
-            echo "[INFO] SDK already extracted"
-            exit 0
-          fi
-          TMP_DIR=$(mktemp -d)
-          tar \
-            --zstd \
-            -xf "${{ env.WORKDIR }}/${{ env.SDK_TARNAME }}" \
-            -C "${TMP_DIR}"
-          EXTRACTED_DIR=$(find "${TMP_DIR}" -mindepth 1 -maxdepth 1 -type d | head -n1)
-          mv "${EXTRACTED_DIR}" "${SDK_DIR}"
-          rm -rf "${TMP_DIR}"
-
-      - name: Configure SDK
-        run: |
-          cd "${{ env.SDK_DIR }}"
-          mkdir -p "${{ env.WORKDIR }}/dl"
-          rm -rf dl
-          ln -sf "${{ env.WORKDIR }}/dl" dl
-
-          if ! grep -q "^src-git ${{ env.CUSTOM_FEED_NAME }}" feeds.conf.default; then
-            echo "src-git ${{ env.CUSTOM_FEED_NAME }} ${{ env.CUSTOM_FEED_REPO }}" \
-              >> feeds.conf.default
-          fi
-
+          cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-          if [ -d feeds/packages/utils/hplip ]; then
-            rm -rf feeds/packages/utils/hplip
-          fi
-
-          USER_INPUT="${{ github.event.inputs.target_packages }}"
-          read -ra PKGS <<< "$USER_INPUT"
-          if [ "${#PKGS[@]}" -eq 0 ]; then
-            echo "[ERROR] No packages specified"
-            exit 1
-          fi
-
-          echo "TARGET_PACKAGES_STR=${PKGS[*]}" >> $GITHUB_ENV
+      - name: Configure Target
+        run: |
+          cd openwrt
+          cat > .config << EOF
+          CONFIG_TARGET_${{ env.TARGET }}=y
+          CONFIG_TARGET_${{ env.TARGET }}_${{ env.SUBTARGET }}=y
+          CONFIG_CCACHE=y
+          EOF
           make defconfig
-          for pkg in "${PKGS[@]}"; do
+
+      - name: Enable Selected Packages
+        run: |
+          cd openwrt
+          for pkg in ${{ github.event.inputs.target_packages }}
+          do
             echo "CONFIG_PACKAGE_${pkg}=m" >> .config
           done
           make defconfig
 
+      - name: Show Configuration
+        run: |
+          cd openwrt
+          echo "===== TARGET ====="
+          grep CONFIG_TARGET_ .config || true
+          echo
+          echo "===== PACKAGES ====="
+          grep CONFIG_PACKAGE_ .config | grep "=m" || true
+
+      - name: Build Host Tools
+        run: |
+          cd openwrt
+          make tools/compile -j$(nproc) || \
+          make tools/compile -j1 V=s
+
+      - name: Build Toolchain
+        run: |
+          cd openwrt
+          make toolchain/compile -j$(nproc) || \
+          make toolchain/compile -j1 V=s
+
       - name: Download Sources
         run: |
-          cd "${{ env.SDK_DIR }}"
-          JOBS=$(nproc)
-          for i in 1 2 3; do
-            make download -j"${JOBS}" && break
-            echo "Retry $i..."
-            sleep 10
-          done
+          cd openwrt
+          make download -j$(nproc)
 
-      - name: Compile Packages
-        timeout-minutes: 120
+      - name: Build Packages
         run: |
-          cd "${{ env.SDK_DIR }}"
-          JOBS=$(nproc)
-          read -ra PKGS <<< "${TARGET_PACKAGES_STR}"
-          SUCCESS_LIST=()
-          FAILED_LIST=()
-          mkdir -p logs
-
+          cd openwrt
           set +e
-          for pkg in "${PKGS[@]}"; do
-            echo "====================================="
-            echo "Building: ${pkg}"
-            echo "====================================="
+          SUCCESS_LIST=""
+          FAILED_LIST=""
+          
+          for pkg in ${{ github.event.inputs.target_packages }}
+          do
+            echo
+            echo "======================================="
+            echo "Building package: $pkg"
+            echo "======================================="
             
-            make package/${pkg}/compile -j"${JOBS}" > logs/${pkg}.log 2>&1
-            if [ $? -eq 0 ]; then
-              SUCCESS_LIST+=("${pkg}")
-              echo "[SUCCESS] ${pkg}"
+            # 使用带有 SDK 前缀和架构特征的日志名，彻底避免冲突
+            LOG_NAME="sdk-build-${{ env.TARGET }}_${{ env.SUBTARGET }}-${pkg}.log"
+            
+            # 1. 尝试多线程并行编译
+            make package/$pkg/compile -j$(nproc) V=s > "$LOG_NAME" 2>&1
+            BUILD_STATUS=$?
+            
+            # 2. 如果多线程失败，尝试单线程 V=s 降级重试
+            if [ $BUILD_STATUS -ne 0 ]; then
+              echo "Parallel build failed for $pkg, retrying with single thread (-j1)..."
+              make package/$pkg/compile -j1 V=s > "$LOG_NAME" 2>&1
+              BUILD_STATUS=$?
+            fi
+            
+            # 3. 统计结果
+            if [ $BUILD_STATUS -eq 0 ]; then
+              SUCCESS_LIST="${SUCCESS_LIST} ${pkg}"
+              echo "SUCCESS: $pkg"
             else
-              FAILED_LIST+=("${pkg}")
-              echo "[FAILED] ${pkg}, retrying with V=s for details..."
-              make package/${pkg}/compile -j1 V=s >> logs/${pkg}.log 2>&1
-              echo ""
-              echo "Last 50 lines:"
-              tail -n 50 logs/${pkg}.log
+              FAILED_LIST="${FAILED_LIST} ${pkg}"
+              echo "FAILED: $pkg"
+              tail -100 "$LOG_NAME"
             fi
           done
-          set -e
+          
+          echo "SUCCESS_LIST=${SUCCESS_LIST}" >> $GITHUB_ENV
+          echo "FAILED_LIST=${FAILED_LIST}" >> $GITHUB_ENV
 
-          {
-            echo "# ImmortalWrt Build Report"
-            echo ""
-            echo "## Target"
-            echo "${{ github.event.inputs.target_combo }}"
-            echo ""
-            echo "## Version"
-            echo "${{ github.event.inputs.immortalwrt_version }}"
-            echo ""
-            echo "## Success"
-            for p in "${SUCCESS_LIST[@]}"; do
-              echo "- ${p}"
-            done
-            echo ""
-            echo "## Failed"
-            for p in "${FAILED_LIST[@]}"; do
-              echo "- ${p}"
-            done
-          } >> "$GITHUB_STEP_SUMMARY"
-
-          if [ ${#SUCCESS_LIST[@]} -eq 0 ]; then
-            echo "[FATAL] All packages failed"
-            exit 1
-          fi
-
-      - name: Collect IPKs
+      - name: Build Summary
+        if: always()
         run: |
-          cd "${{ env.SDK_DIR }}"
-          mkdir -p "${{ env.OUTPUT_DIR }}"
-          find bin/packages \
-            -type f \
-            -name "*.ipk" \
-            -exec cp -f {} "${{ env.OUTPUT_DIR }}/" \;
-          echo "Collected files:"
-          ls -lh "${{ env.OUTPUT_DIR }}"
+          echo "=================="
+          echo "SUCCESS"
+          echo "=================="
+          echo "${SUCCESS_LIST}"
+          echo
+          echo "=================="
+          echo "FAILED"
+          echo "=================="
+          echo "${FAILED_LIST}"
 
-      - name: Upload IPKs
+      - name: Collect Printing Packages
+        if: always()
+        run: |
+          DEST="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/${{ env.TARGET }}_${{ env.SUBTARGET }}"
+          mkdir -p "${DEST}"
+          find openwrt/bin/packages \
+            -path "*/printing/*" \
+            \( -name "*.apk" -o -name "*.ipk" \) \
+            -exec cp {} "${DEST}/" \;
+          echo "Collected packages:"
+          ls -al "${DEST}"
+
+      - name: Gather Logs
+        if: always()
+        run: |
+          mkdir -p logs
+          find openwrt \
+            -name "sdk-build-${{ env.TARGET }}_${{ env.SUBTARGET }}-*.log" \
+            -exec cp {} logs/ \; || true
+
+      - name: Upload Packages
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ipk-${{ github.event.inputs.target_combo }}-${{ github.event.inputs.immortalwrt_version }}
-          path: |
-            ${{ env.OUTPUT_DIR }}/*.ipk
-          if-no-files-found: error
+          name: sdk-printing-${{ env.TARGET }}-${{ env.SUBTARGET }}
+          path: output/
 
       - name: Upload Build Logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-logs
-          path: |
-            ${{ env.SDK_DIR }}/logs
+          name: sdk-logs-${{ env.TARGET }}-${{ env.SUBTARGET }}
+          path: logs/
