@@ -1,0 +1,220 @@
+name: Build Printing Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: "OpenWrt Version"
+        required: true
+        default: "25.12.6"
+        type: choice
+        options:
+          - "24.10.8"
+          - "25.12.6"
+          - "snapshot"
+      custom_version:
+        description: "Custom Version"
+        required: false
+        default: ""
+      target_combo:
+        description: "target:subtarget"
+        required: true
+        default: "qualcommax:ipq807x"
+      target_packages:
+        description: "Packages separated by spaces (dependencies first)"
+        required: true
+        default: "cups cups-filters ghostscript gutenprint poppler brlaser qpdf"
+
+env:
+  CUSTOM_FEED_REPO: https://github.com/TW20022/openwrt-24-printing-packages.git
+  OUTPUT_DIR: output
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout Workflow Repository
+        uses: actions/checkout@v4
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential ccache cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext git gperf help2man intltool jq libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool lrzsz ninja-build p7zip-full patch pkgconf python3 python3-pip rsync scons squashfs-tools subversion swig texinfo uglifyjs unzip wget xxd zlib1g-dev
+
+      - name: Resolve Version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.custom_version }}" ]; then
+            echo "version=${{ github.event.inputs.custom_version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ github.event.inputs.openwrt_version }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Parse Target
+        run: |
+          TARGET_COMBO="${{ github.event.inputs.target_combo }}"
+          TARGET="${TARGET_COMBO%%:*}"
+          SUBTARGET="${TARGET_COMBO#*:}"
+          echo "TARGET=${TARGET}" >> $GITHUB_ENV
+          echo "SUBTARGET=${SUBTARGET}" >> $GITHUB_ENV
+
+      - name: Clone OpenWrt
+        run: |
+          git clone https://github.com/openwrt/openwrt.git openwrt
+          cd openwrt
+          VERSION="${{ steps.version.outputs.version }}"
+          if [ "$VERSION" = "snapshot" ]; then
+            echo "Using OpenWrt master branch"
+          else
+            git fetch --tags
+            if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+              git checkout "v${VERSION}"
+            else
+              echo "::error::Tag v${VERSION} not found"
+              exit 1
+            fi
+          fi
+
+      - name: Cache dl
+        uses: actions/cache@v4
+        with:
+          path: openwrt/dl
+          key: dl-${{ steps.version.outputs.version }}
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.ccache
+          key: ccache-${{ github.event.inputs.target_combo }}
+
+      - name: Add Printing Feed
+        run: |
+          cd openwrt
+          echo "" >> feeds.conf.default
+          echo "src-git printing ${CUSTOM_FEED_REPO}" >> feeds.conf.default
+
+      - name: Update Feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure Target
+        run: |
+          cd openwrt
+          cat > .config << EOF
+          CONFIG_TARGET_${{ env.TARGET }}=y
+          CONFIG_TARGET_${{ env.TARGET }}_${{ env.SUBTARGET }}=y
+          CONFIG_CCACHE=y
+          EOF
+          make defconfig
+
+      - name: Enable Selected Packages
+        run: |
+          cd openwrt
+          for pkg in ${{ github.event.inputs.target_packages }}
+          do
+            echo "CONFIG_PACKAGE_${pkg}=m" >> .config
+          done
+          make defconfig
+
+      - name: Show Configuration
+        run: |
+          cd openwrt
+          echo "===== TARGET ====="
+          grep CONFIG_TARGET_ .config || true
+          echo
+          echo "===== PACKAGES ====="
+          grep CONFIG_PACKAGE_ .config | grep "=m" || true
+
+      - name: Build Host Tools
+        run: |
+          cd openwrt
+          make tools/compile -j$(nproc) || \
+          make tools/compile -j1 V=s
+
+      - name: Build Toolchain
+        run: |
+          cd openwrt
+          make toolchain/compile -j$(nproc) || \
+          make toolchain/compile -j1 V=s
+
+      - name: Download Sources
+        run: |
+          cd openwrt
+          make download -j$(nproc)
+
+      - name: Build Packages
+        run: |
+          cd openwrt
+          SUCCESS_LIST=""
+          FAILED_LIST=""
+          for pkg in ${{ github.event.inputs.target_packages }}
+          do
+            echo
+            echo "======================================="
+            echo "Building package: $pkg"
+            echo "======================================="
+            make package/$pkg/compile \
+              -j$(nproc) \
+              V=s \
+              > build-${pkg}.log 2>&1
+            if [ $? -eq 0 ]; then
+              SUCCESS_LIST="${SUCCESS_LIST} ${pkg}"
+            else
+              FAILED_LIST="${FAILED_LIST} ${pkg}"
+              echo
+              echo "FAILED: $pkg"
+              echo
+              tail -100 build-${pkg}.log
+            fi
+          done
+          echo "SUCCESS_LIST=${SUCCESS_LIST}" >> $GITHUB_ENV
+          echo "FAILED_LIST=${FAILED_LIST}" >> $GITHUB_ENV
+
+      - name: Build Summary
+        if: always()
+        run: |
+          echo "=================="
+          echo "SUCCESS"
+          echo "=================="
+          echo "${SUCCESS_LIST}"
+          echo
+          echo "=================="
+          echo "FAILED"
+          echo "=================="
+          echo "${FAILED_LIST}"
+
+      - name: Collect Printing Packages
+        if: always()
+        run: |
+          DEST="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/${{ env.TARGET }}_${{ env.SUBTARGET }}"
+          mkdir -p "${DEST}"
+          find openwrt/bin/packages \
+            -path "*/printing/*" \
+            \( -name "*.apk" -o -name "*.ipk" \) \
+            -exec cp {} "${DEST}/" \;
+          echo "Collected packages:"
+          ls -al "${DEST}"
+
+      - name: Gather Logs
+        if: always()
+        run: |
+          mkdir -p logs
+          find openwrt \
+            -name "*.log" \
+            -exec cp {} logs/ \; || true
+
+      - name: Upload Packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: printing-${{ env.TARGET }}-${{ env.SUBTARGET }}
+          path: output/
+
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ env.TARGET }}-${{ env.SUBTARGET }}
+          path: logs/
