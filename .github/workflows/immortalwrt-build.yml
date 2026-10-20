@@ -111,7 +111,7 @@ jobs:
       - name: Debug fficonfig.h
         run: |
           cd openwrt
-          ind build_dir -name fficonfig.h
+          find build_dir -name fficonfig.h
 
           make defconfig
 
