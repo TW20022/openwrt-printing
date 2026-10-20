@@ -108,6 +108,18 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      - name: Debug and Fix libffi
+        run: |
+          cd openwrt
+          echo "===== Before Patch ====="
+          grep -n "fficonfig.h" feeds/packages/libs/libffi/Makefile || true
+
+          # 暴力精准替换：将旧的 cp 块直接换成安全的 find 单行命令
+          sed -i '/fficonfig.h/c\	find $(PKG_BUILD_DIR) -name "fficonfig.h" | head -n 1 | xargs -r -I {} cp -fp {} $(1)/usr/include/' feeds/packages/libs/libffi/Makefile || true
+
+          echo "===== After Patch ====="
+          grep -n "fficonfig.h" feeds/packages/libs/libffi/Makefile || true    
+
       - name: Configure Target
         run: |
           cd openwrt
