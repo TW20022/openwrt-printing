@@ -107,21 +107,12 @@ jobs:
           cd openwrt
           ./scripts/feeds update -a
           ./scripts/feeds install -a
-
-      - name: Quick Fix libffi for mipsel
+          
+      - name: Debug fficonfig.h
         run: |
           cd openwrt
-          # 直接把包含 fficonfig.h 的那段不可靠拷贝命令替换为安全的 find 查找
-          sed -i '/\$(PKG_BUILD_DIR)\/\$(GNU_TARGET_NAME)\*\/fficonfig.h/c\	find \$(PKG_BUILD_DIR) -name "fficonfig.h" -exec cp -fp {} \$(1)/usr/include/ \\;' feeds/packages/libs/libffi/Makefile
+          ind build_dir -name fficonfig.h
 
-      - name: Configure Target
-        run: |
-          cd openwrt
-          cat > .config << EOF
-          CONFIG_TARGET_${{ env.TARGET }}=y
-          CONFIG_TARGET_${{ env.TARGET }}_${{ env.SUBTARGET }}=y
-          CONFIG_CCACHE=y
-          EOF
           make defconfig
 
       - name: Enable Selected Packages
