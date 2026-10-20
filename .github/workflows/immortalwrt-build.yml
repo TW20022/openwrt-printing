@@ -108,30 +108,11 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: Fix libffi
+      - name: Quick Fix libffi for mipsel
         run: |
           cd openwrt
-          python3 <<'EOF'
-          from pathlib import Path
-          import re
-
-          mk = Path("feeds/packages/libs/libffi/Makefile")
-          s = mk.read_text()
-
-          # 使用正则匹配：不关心的行首缩进，只抓取核心结构
-          pattern = r'\$\(CP\)\s*\\\s*\$\(PKG_BUILD_DIR\)/\$\(GNU_TARGET_NAME\)\*/fficonfig.h\s*\\\s*\$\(1\)/usr/include/'
-          
-          # 替换为安全的单行 find 命令（前面带个 Tab 保持缩进风格）
-          new_line = '\tfind $(PKG_BUILD_DIR) -name "fficonfig.h" | head -n 1 | xargs -r -I {} cp -fp {} $(1)/usr/include/'
-
-          s, count = re.subn(pattern, new_line, s)
-          if count > 0:
-              mk.write_text(s)
-              print(f"libffi patched successfully, count: {count}")
-          else:
-              print("ERROR: target block not found, please check Makefile content")
-              exit(1)
-          EOF   
+          # 直接把包含 fficonfig.h 的那段不可靠拷贝命令替换为安全的 find 查找
+          sed -i '/\$(PKG_BUILD_DIR)\/\$(GNU_TARGET_NAME)\*\/fficonfig.h/c\	find \$(PKG_BUILD_DIR) -name "fficonfig.h" -exec cp -fp {} \$(1)/usr/include/ \\;' feeds/packages/libs/libffi/Makefile
 
       - name: Configure Target
         run: |
