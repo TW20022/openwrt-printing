@@ -1,4 +1,4 @@
-name: Build Printing Packages (git)
+name: Build Printing Packages (Openwrt)
 
 on:
   workflow_dispatch:
@@ -43,6 +43,11 @@ jobs:
     steps:
       - name: Checkout Workflow Repository
         uses: actions/checkout@v4
+
+      - name: Enable Swap Space
+        uses: pierotofy/set-swap-space@master
+        with:
+          swap-size-gb: 4
 
       - name: Install Build Dependencies
         run: |
@@ -167,13 +172,24 @@ jobs:
             echo "Building package: $pkg"
             echo "======================================="
             
-            make package/$pkg/compile -j$(nproc) V=s > build-${pkg}.log 2>&1
-            BUILD_STATUS=$?
-            
-            if [ $BUILD_STATUS -ne 0 ]; then
-              echo "Parallel build failed for $pkg, retrying with single thread (-j1)..."
+            # 2. 核心优化：针对 gutenprint 专门处理，强制单线程（-j1）防止多线程内存撕裂，且编译前先 clean
+            if [ "$pkg" = "gutenprint" ]; then
+              echo "Detected gutenprint: forcing pre-clean and single-thread (-j1) build..."
+              make package/$pkg/clean
+              # 确保其 host 依赖被正确触发编译
+              make package/$pkg/host/compile V=s || true
               make package/$pkg/compile -j1 V=s > build-${pkg}.log 2>&1
               BUILD_STATUS=$?
+            else
+              make package/$pkg/compile -j$(nproc) V=s > build-${pkg}.log 2>&1
+              BUILD_STATUS=$?
+              
+              if [ $BUILD_STATUS -ne 0 ]; then
+                echo "Parallel build failed for $pkg, cleaning and retrying with -j1..."
+                make package/$pkg/clean
+                make package/$pkg/compile -j1 V=s > build-${pkg}.log 2>&1
+                BUILD_STATUS=$?
+              fi
             fi
             
             if [ $BUILD_STATUS -eq 0 ]; then
@@ -201,6 +217,12 @@ jobs:
           echo "FAILED"
           echo "=================="
           echo "${FAILED_LIST}"
+          
+          # 3. 核心优化：如果出现失败包，让任务显式失败，不再出现“假成功”绿勾
+          if [ -n "${FAILED_LIST}" ]; then
+            echo "::error::One or more packages failed to build."
+            exit 1
+          fi
 
       - name: Collect Printing Packages
         if: always()
