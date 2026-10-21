@@ -176,6 +176,8 @@ jobs:
             if [ "$pkg" = "gutenprint" ]; then
               echo "Detected gutenprint: forcing pre-clean and single-thread (-j1) build..."
               make package/$pkg/clean
+              rm -rf openwrt/staging_dir/*/stamp/.${pkg}* || true
+              rm -rf openwrt/build_dir/target-*/gutenprint-* || true
               # 确保其 host 依赖被正确触发编译
               make package/$pkg/host/compile V=s || true
               make package/$pkg/compile -j1 V=s > build-${pkg}.log 2>&1
