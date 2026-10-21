@@ -224,15 +224,14 @@ jobs:
             exit 1
           fi
 
-      - name: Collect Printing Packages
+      - name: Collect All Built Packages
         if: always()
         run: |
           DEST="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/${{ env.TARGET }}_${{ env.SUBTARGET }}_${{ env.VERSION }}"
           mkdir -p "${DEST}"
-          find openwrt/bin/packages \
-            -path "*/printing/*" \
-            \( -name "*.apk" -o -name "*.ipk" \) \
-            -exec cp {} "${DEST}/" \;
+
+          find openwrt/bin/ -type f \( -name "*.apk" -o -name "*.ipk" \) -exec cp -t "${DEST}/" {} +
+          
           echo "Collected packages:"
           ls -al "${DEST}"
 
