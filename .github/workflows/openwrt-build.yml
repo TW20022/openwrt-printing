@@ -31,7 +31,7 @@ on:
       target_packages:
         description: "Packages separated by spaces"
         required: true
-        default: "cups cups-filters ghostscript gutenprint foo2zjs brlaser splix"
+        default: "cups cups-filters ghostscript gutenprint-cups foo2zjs brlaser splix"
 
 env:
   CUSTOM_FEED_REPO: https://github.com/TW20022/openwrt-24-printing-packages.git
