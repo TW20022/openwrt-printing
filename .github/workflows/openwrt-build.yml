@@ -172,17 +172,29 @@ jobs:
             echo "Building package: $pkg"
             echo "======================================="
             
-            # 2. 核心优化：针对 gutenprint 专门处理，强制单线程（-j1）防止多线程内存撕裂，且编译前先 clean
-            if [ "$pkg" = "gutenprint" ]; then
-              echo "Detected gutenprint: forcing pre-clean and single-thread (-j1) build..."
-              make package/$pkg/clean
+            # 核心映射：如果包名是 gutenprint-cups，实际编译目录是 gutenprint
+            BUILD_DIR_PKG="$pkg"
+            if [ "$pkg" = "gutenprint-cups" ]; then
+              BUILD_DIR_PKG="gutenprint"
+            fi
+            
+            # 针对 gutenprint 系列包走单线程和深度清理保护
+            if echo "$pkg" | grep -q "gutenprint"; then
+              echo "Detected gutenprint package ($pkg): mapping to directory '$BUILD_DIR_PKG', forcing single-thread (-j1) build..."
+              
+              # 使用真实的目录名进行 clean
+              make package/$BUILD_DIR_PKG/clean || true
               rm -rf openwrt/staging_dir/*/stamp/.${pkg}* || true
               rm -rf openwrt/build_dir/target-*/gutenprint-* || true
-              # 确保其 host 依赖被正确触发编译
-              make package/$pkg/host/compile V=s || true
-              make package/$pkg/compile -j1 V=s > build-${pkg}.log 2>&1
+              
+              # 确保 host 依赖正确触发
+              make package/$BUILD_DIR_PKG/host/compile V=s || true
+              
+              # 使用真实的目录名进行编译
+              make package/$BUILD_DIR_PKG/compile -j1 V=s > build-${pkg}.log 2>&1
               BUILD_STATUS=$?
             else
+              # 其他普通包正常多线程并发编译
               make package/$pkg/compile -j$(nproc) V=s > build-${pkg}.log 2>&1
               BUILD_STATUS=$?
               
