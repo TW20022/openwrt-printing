@@ -9,6 +9,7 @@ on:
         default: "25.12.6"
         type: choice
         options:
+          - "21.02.7"
           - "24.10.8"
           - "25.12.6"
           - "snapshot"
@@ -27,6 +28,7 @@ on:
           - "airoha:an7583"
           - "mediatek:filogic"
           - "armsr:armv8"
+          - "ipq40xx:generic"
           - "x86:64"
       target_packages:
         description: "Packages separated by spaces"
