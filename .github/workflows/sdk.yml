@@ -1,0 +1,320 @@
+name: SDK Build 
+
+on:
+  workflow_dispatch:
+    inputs:
+      openwrt_version:
+        description: "OpenWrt Version"
+        required: true
+        default: "25.12.6"
+        type: choice
+        options:
+          - "25.12.6"
+          - "24.10.8"
+          - "snapshot"
+      custom_version:
+        description: "Custom OpenWrt Version (optional)"
+        required: false
+        default: ""
+      target_combo:
+        description: "Target:Subtarget"
+        required: true
+        default: "armsr:armv8"
+        type: choice
+        options:
+          - "armsr:armv8"
+          - "qualcommax:ipq807x"
+          - "airoha:an7581"
+          - "airoha:an7583"
+          - "mediatek:filogic"
+          - "ramips:mt7621"
+          - "x86:64"
+      target_packages:
+        description: "Packages separated by spaces"
+        required: true
+        default: "cups cups-filters ghostscript gutenprint foo2zjs brlaser splix hplip"
+
+env:
+  CUSTOM_FEED_REPO: https://github.com/TW20022/openwrt-24-printing-packages
+  CUSTOM_FEED_NAME: printing
+  OUTPUT_DIR: output
+
+concurrency:
+  group: openwrt-printing-${{ github.event.inputs.target_combo }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 350
+    env:
+      PKGS: ${{ github.event.inputs.target_packages }}
+      TARGET_COMBO: ${{ github.event.inputs.target_combo }}
+      CUSTOM_VERSION: ${{ github.event.inputs.custom_version }}
+    steps:
+      - name: Checkout Workflow Repository
+        uses: actions/checkout@v5
+
+      # OpenWrt 全量工具链 + 打印包依赖链(ghostscript/hplip 等)极易耗尽磁盘
+      # 这是 OpenWrt CI 编译失败的头号原因，先释放约 25GB 空间
+      - name: Free Disk Space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/.ghcup /opt/hostedtoolcache/CodeQL
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          df -h /
+
+      - name: Install Build Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ack antlr3 asciidoc autoconf automake autopoint \
+            binutils bison build-essential ccache clang cmake cpio curl \
+            device-tree-compiler ecj fastjar flex gawk gettext gcc-multilib \
+            g++-multilib git gnutls-dev gperf haveged help2man intltool \
+            lib32gcc-s1 libc6-dev-i386 libelf-dev libglib2.0-dev libgmp3-dev \
+            libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libncursesw5-dev \
+            libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev \
+            libz-dev lld llvm make jq ninja-build p7zip-full patch pkgconf \
+            python3 python3-pip python3-ply python3-docutils qemu-utils \
+            re2c rsync scons squashfs-tools subversion swig texinfo unzip \
+            wget xxd zlib1g-dev zstd
+
+      - name: Resolve Version
+        id: version
+        run: |
+          V="${CUSTOM_VERSION:-${{ github.event.inputs.openwrt_version }}}"
+          echo "version=${V}" >> "$GITHUB_OUTPUT"
+          echo "Resolved OpenWrt version: ${V}"
+
+      - name: Parse Target
+        run: |
+          echo "TARGET=${TARGET_COMBO%%:*}" >> "$GITHUB_ENV"
+          echo "SUBTARGET=${TARGET_COMBO#*:}" >> "$GITHUB_ENV"
+
+      - name: Clone OpenWrt
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if [ "$VERSION" = "snapshot" ]; then
+            git clone --depth 1 https://github.com/openwrt/openwrt.git openwrt
+          else
+            # 浅克隆 + 直接指定 tag，比全量 clone + fetch --tags 快数倍
+            if git ls-remote --tags --exit-code https://github.com/openwrt/openwrt.git "refs/tags/v${VERSION}" >/dev/null 2>&1; then
+              git clone --depth 1 --branch "v${VERSION}" \
+                https://github.com/openwrt/openwrt.git openwrt
+            else
+              echo "::error::Tag v${VERSION} not found"
+              exit 1
+            fi
+          fi
+
+      - name: Cache dl
+        uses: actions/cache@v5
+        with:
+          path: openwrt/dl
+          key: sdk-dl-${{ steps.version.outputs.version }}-${{ github.event.inputs.target_combo }}
+          # 新版本/新 target 首次构建可复用旧缓存，避免完全冷启动
+          restore-keys: |
+            sdk-dl-${{ steps.version.outputs.version }}-
+            sdk-dl-
+
+      - name: Cache ccache
+        uses: actions/cache@v5
+        with:
+          path: ~/.ccache
+          key: sdk-ccache-${{ steps.version.outputs.version }}-${{ github.event.inputs.target_combo }}
+          restore-keys: |
+            sdk-ccache-${{ steps.version.outputs.version }}-${{ github.event.inputs.target_combo }}
+            sdk-ccache-
+
+      - name: Add Printing Feed (Highest Priority)
+        run: |
+          cd openwrt
+          # 自定义 feed 放在 feeds.conf.default 最顶部 => scripts/feeds 按文件顺序安装，
+          # 排在前面的 feed 优先级最高，同名包（如 cups/ghostscript）会覆盖官方 packages feed 的版本
+          # 注意 feeds.conf 语法：锁分支用 url;branch，锁 commit 用 url^commit，
+          # 不能写成 "url commit"（空格分隔会被解析成第二个 feed URL）
+          FEED_COMMIT=$(git ls-remote "${CUSTOM_FEED_REPO}" HEAD | cut -f1) \
+            || echo "::warning::Cannot resolve feed commit, using floating HEAD"
+          if [ -n "${FEED_COMMIT}" ]; then
+            FEED_LINE="src-git ${CUSTOM_FEED_NAME} ${CUSTOM_FEED_REPO}^${FEED_COMMIT}"
+          else
+            FEED_LINE="src-git ${CUSTOM_FEED_NAME} ${CUSTOM_FEED_REPO}"
+          fi
+          { echo "${FEED_LINE}"; cat feeds.conf.default; } > feeds.conf.default.new
+          mv feeds.conf.default.new feeds.conf.default
+          cat feeds.conf.default
+
+      - name: Update Feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure Target and Packages
+        run: |
+          cd openwrt
+          cat > .config << EOF
+          CONFIG_TARGET_${{ env.TARGET }}=y
+          CONFIG_TARGET_${{ env.TARGET }}_${{ env.SUBTARGET }}=y
+          CONFIG_CCACHE=y
+          EOF
+          make defconfig
+          for pkg in ${PKGS}; do
+            echo "CONFIG_PACKAGE_${pkg}=m" >> .config
+          done
+          make defconfig
+
+      - name: Validate Package Names
+        run: |
+          cd openwrt
+          # 自定义 feed 必须成功安装，否则说明仓库拉取失败
+          if [ ! -d "package/feeds/${CUSTOM_FEED_NAME}" ]; then
+            echo "::error::Custom feed '${CUSTOM_FEED_NAME}' was not installed"
+            exit 1
+          fi
+          echo "Custom feed '${CUSTOM_FEED_NAME}' contains $(ls -1 package/feeds/${CUSTOM_FEED_NAME} | wc -l) packages:"
+          ls -1 package/feeds/${CUSTOM_FEED_NAME}
+
+          # 确保包元数据已生成（defconfig 正常会触发，缺了就补一次）
+          [ -f tmp/.packageinfo ] || make -j$(nproc) prepare-tmpinfo >/dev/null 2>&1 || true
+
+          MISSING=""
+          for pkg in ${PKGS}; do
+            if [ ! -e "package/feeds/${CUSTOM_FEED_NAME}/${pkg}" ]; then
+              echo "::notice::${pkg} 不是来自自定义 feed（使用官方 feed 版本）"
+            fi
+            if [ -f tmp/.packageinfo ] && ! grep -qs "^Package: ${pkg}$" tmp/.packageinfo; then
+              MISSING="${MISSING} ${pkg}"
+              echo "::warning::Package '${pkg}' not found in any feed"
+            fi
+          done
+          if [ -n "${MISSING}" ]; then
+            echo "NOT_FOUND_LIST=${MISSING}" >> "$GITHUB_ENV"
+            echo "以下包名在任何 feed 中都不存在，将直接失败（通常是拼写错误或 feed 缺失）: ${MISSING}"
+          else
+            echo "NOT_FOUND_LIST=" >> "$GITHUB_ENV"
+          fi
+
+      - name: Show Configuration
+        run: |
+          cd openwrt
+          echo "===== TARGET ====="
+          grep CONFIG_TARGET_ .config || true
+          echo "===== PACKAGES ====="
+          grep CONFIG_PACKAGE_ .config | grep "=m" || true
+          df -h /
+
+      # 失败即退出：以下步骤不再做 -j1 单线程降级重试
+      - name: Build Host Tools
+        run: |
+          cd openwrt
+          make tools/compile -j$(nproc)
+
+      - name: Build Toolchain
+        run: |
+          cd openwrt
+          make toolchain/compile -j$(nproc)
+
+      - name: Download Sources
+        run: |
+          cd openwrt
+          make download -j$(nproc)
+          ZERO=$(find dl -type f -size 0 2>/dev/null | head -20 || true)
+          if [ -n "${ZERO}" ]; then
+            echo "::error::Zero-size downloads detected:"
+            echo "${ZERO}"
+            exit 1
+          fi
+
+      - name: Build Packages
+        run: |
+          cd openwrt
+          SUCCESS_LIST=""
+          FAILED_LIST=""
+          {
+            echo "SUCCESS_LIST="
+            echo "FAILED_LIST="
+            echo "FAILED_AT="
+          } >> "$GITHUB_ENV"
+
+          for pkg in ${PKGS}; do
+            echo
+            echo "======================================="
+            echo "Building package: $pkg"
+            echo "======================================="
+
+            LOG="${GITHUB_WORKSPACE}/sdk-build-${TARGET}_${SUBTARGET}-${pkg}.log"
+
+            # 首次失败即终止：不做单线程降级重试
+            if make "package/$pkg/compile" -j$(nproc) > "${LOG}" 2>&1; then
+              SUCCESS_LIST="${SUCCESS_LIST} ${pkg}"
+              echo "SUCCESS: $pkg"
+              {
+                echo "SUCCESS_LIST=${SUCCESS_LIST}"
+                echo "FAILED_LIST=${FAILED_LIST}"
+              } >> "$GITHUB_ENV"
+            else
+              FAILED_LIST="${FAILED_LIST} ${pkg}"
+              echo "::error::Build failed for package: $pkg"
+              tail -100 "${LOG}" || true
+              # 先把结果落到 env/summary，再退出，保证汇总信息完整
+              {
+                echo "SUCCESS_LIST=${SUCCESS_LIST}"
+                echo "FAILED_LIST=${FAILED_LIST}"
+                echo "FAILED_AT=${pkg}"
+              } >> "$GITHUB_ENV"
+              exit 1
+            fi
+            df -h / | tail -1
+          done
+
+      - name: Build Summary
+        if: always()
+        run: |
+          {
+            echo "## Build Summary ($TARGET / $SUBTARGET, OpenWrt ${{ steps.version.outputs.version }})"
+            echo
+            echo "| Status | Packages |"
+            echo "|--------|----------|"
+            echo "| ✅ SUCCESS | ${SUCCESS_LIST:-（无）} |"
+            echo "| ❌ FAILED | ${FAILED_LIST:-（无）} |"
+            echo "| ❓ NOT FOUND | ${NOT_FOUND_LIST:-（无）} |"
+            if [ -n "${FAILED_AT}" ]; then
+              echo
+              echo "> ⛔ 构建在包 \`${FAILED_AT}\` 处失败并立即终止（未做单线程重试），后续包未编译。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Collect Printing Packages
+        if: always()
+        run: |
+          DEST="${GITHUB_WORKSPACE}/${OUTPUT_DIR}/${TARGET}_${SUBTARGET}"
+          mkdir -p "${DEST}"
+          # 按包名收集而不是按 feed 目录过滤：cups 等包可能来自 packages feed 而非 printing feed
+          for pkg in ${PKGS}; do
+            find openwrt/bin/packages -type f \
+              \( -name "${pkg}_*.ipk" -o -name "${pkg}-*.apk" \) \
+              -exec cp {} "${DEST}/" \;
+          done
+          echo "Collected packages:"
+          ls -al "${DEST}"
+
+      - name: Gather Logs
+        if: always()
+        run: |
+          mkdir -p logs
+          find . -maxdepth 1 -name "sdk-build-*.log" -exec cp {} logs/ \; || true
+
+      - name: Upload Packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-printing-${{ env.TARGET }}-${{ env.SUBTARGET }}
+          path: output/
+
+      - name: Upload Build Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-logs-${{ env.TARGET }}-${{ env.SUBTARGET }}
+          path: logs/
