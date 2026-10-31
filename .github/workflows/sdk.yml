@@ -1,4 +1,4 @@
-name: SDK Build 
+name: Build Printing Packages (SDK)
 
 on:
   workflow_dispatch:
@@ -30,9 +30,9 @@ on:
           - "ramips:mt7621"
           - "x86:64"
       target_packages:
-        description: "Packages separated by spaces"
+        description: "Packages separated by spaces (注意 gutenprint 的实际包名是 gutenprint-cups)"
         required: true
-        default: "cups cups-filters ghostscript gutenprint foo2zjs brlaser splix hplip"
+        default: "cups cups-filters ghostscript gutenprint-cups foo2zjs brlaser splix hplip"
 
 env:
   CUSTOM_FEED_REPO: https://github.com/TW20022/openwrt-24-printing-packages
@@ -150,6 +150,30 @@ jobs:
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
+      - name: Fix python setuptools host backend
+        run: |
+          cd openwrt
+          # 25.12 起 python 包走 PEP517：hostpkg 里的 python -m build --no-isolation
+          # 若 pyproject 的 backend 是 setuptools 而 hostpkg 没有 setuptools，就会报
+          #   Backend 'setuptools.build_meta' is not available
+          # （OpenWrt issue #29077 即此问题，官方只给 python-pip 单独补了 host 依赖）
+          # hplip 依赖 python3-distro，而 python-distro 正是 setuptools 后端，这里补上 host 依赖
+          MK="feeds/packages/lang/python/python-distro/Makefile"
+          if [ ! -f "${MK}" ]; then
+            echo "::notice::${MK} 不存在，跳过 setuptools 补丁"
+            exit 0
+          fi
+          if grep -q "python-setuptools/host" "${MK}"; then
+            echo "python-distro 已声明 python-setuptools/host，无需修改"
+            exit 0
+          fi
+          if grep -q "^HOST_BUILD_DEPENDS" "${MK}"; then
+            sed -i '0,/^HOST_BUILD_DEPENDS/s#^HOST_BUILD_DEPENDS *:*= *#&python-setuptools/host #' "${MK}"
+          else
+            sed -i '/^include \.\.\/python3-package\.mk/a HOST_BUILD_DEPENDS+=python-setuptools/host' "${MK}"
+          fi
+          grep -n "HOST_BUILD_DEPENDS" "${MK}" || true
+
       - name: Configure Target and Packages
         run: |
           cd openwrt
@@ -164,36 +188,58 @@ jobs:
           done
           make defconfig
 
-      - name: Validate Package Names
+      - name: Validate Packages and Resolve Sources
         run: |
           cd openwrt
+
           # 自定义 feed 必须成功安装，否则说明仓库拉取失败
           if [ ! -d "package/feeds/${CUSTOM_FEED_NAME}" ]; then
             echo "::error::Custom feed '${CUSTOM_FEED_NAME}' was not installed"
             exit 1
           fi
-          echo "Custom feed '${CUSTOM_FEED_NAME}' contains $(ls -1 package/feeds/${CUSTOM_FEED_NAME} | wc -l) packages:"
-          ls -1 package/feeds/${CUSTOM_FEED_NAME}
+          echo "Custom feed '${CUSTOM_FEED_NAME}' contains $(ls -1 package/feeds/${CUSTOM_FEED_NAME} | wc -l) packages"
 
           # 确保包元数据已生成（defconfig 正常会触发，缺了就补一次）
           [ -f tmp/.packageinfo ] || make -j$(nproc) prepare-tmpinfo >/dev/null 2>&1 || true
+          if [ ! -f tmp/.packageinfo ]; then
+            echo "::error::tmp/.packageinfo missing, cannot resolve packages"
+            exit 1
+          fi
+
+          # 包名 -> 源码目录 映射。
+          # CONFIG_PACKAGE_<X> 用的是“包名”，而 make package/<X>/compile 用的是“源码目录”，
+          # 两者经常不同（如 gutenprint 目录里只有 gutenprint-cups 包）
+          awk '
+            /^Source-Makefile:/ { p=$2; sub(/\/Makefile$/,"",p); sub(/^package\//,"",p); cur=p }
+            /^Package:/ { if (cur != "") print $2 "\t" cur }
+          ' tmp/.packageinfo > "${GITHUB_WORKSPACE}/pkgdir.map"
+          echo "Resolved $(wc -l < "${GITHUB_WORKSPACE}/pkgdir.map") package->dir entries"
 
           MISSING=""
           for pkg in ${PKGS}; do
-            if [ ! -e "package/feeds/${CUSTOM_FEED_NAME}/${pkg}" ]; then
-              echo "::notice::${pkg} 不是来自自定义 feed（使用官方 feed 版本）"
-            fi
-            if [ -f tmp/.packageinfo ] && ! grep -qs "^Package: ${pkg}$" tmp/.packageinfo; then
+            DIR=$(awk -F'\t' -v p="${pkg}" '$1==p{print $2; exit}' "${GITHUB_WORKSPACE}/pkgdir.map")
+            if [ -z "${DIR}" ]; then
               MISSING="${MISSING} ${pkg}"
-              echo "::warning::Package '${pkg}' not found in any feed"
+              echo "::error::Package '${pkg}' not found in any feed"
+              # 常见情况：Makefile 只定义了子包（如 gutenprint -> gutenprint-cups），给出候选名
+              CANDS=$(grep -oE "^Package: ${pkg}[-a-zA-Z0-9_.]*$" tmp/.packageinfo \
+                | sed 's/^Package: //' | head -8 | tr '\n' ' ')
+              [ -n "${CANDS}" ] && echo "           可能想用: ${CANDS}"
+            else
+              echo "  ${pkg} -> package/${DIR}"
+              case "${DIR}" in
+                "feeds/${CUSTOM_FEED_NAME}/"*) : ;;
+                *) echo "::notice::${pkg} 来自官方 feed（package/${DIR}），不是自定义打印 feed" ;;
+              esac
             fi
           done
+
           if [ -n "${MISSING}" ]; then
             echo "NOT_FOUND_LIST=${MISSING}" >> "$GITHUB_ENV"
-            echo "以下包名在任何 feed 中都不存在，将直接失败（通常是拼写错误或 feed 缺失）: ${MISSING}"
-          else
-            echo "NOT_FOUND_LIST=" >> "$GITHUB_ENV"
+            echo "::error::以下包名不存在:${MISSING} —— 与其编译到一半才失败，此处直接终止"
+            exit 1
           fi
+          echo "NOT_FOUND_LIST=" >> "$GITHUB_ENV"
 
       - name: Show Configuration
         run: |
@@ -238,17 +284,33 @@ jobs:
           } >> "$GITHUB_ENV"
 
           for pkg in ${PKGS}; do
+            # 包名 -> 源码目录（make package/<dir>/compile）
+            DIR=$(awk -F'\t' -v p="${pkg}" '$1==p{print $2; exit}' "${GITHUB_WORKSPACE}/pkgdir.map")
+            if [ -z "${DIR}" ]; then
+              echo "::error::Cannot resolve source directory for package '${pkg}'"
+              exit 1
+            fi
+
             echo
             echo "======================================="
-            echo "Building package: $pkg"
+            echo "Building package: $pkg  (package/${DIR})"
             echo "======================================="
 
             LOG="${GITHUB_WORKSPACE}/sdk-build-${TARGET}_${SUBTARGET}-${pkg}.log"
 
-            # 首次失败即终止：不做单线程降级重试
-            if make "package/$pkg/compile" -j$(nproc) > "${LOG}" 2>&1; then
+            # 磁盘护栏：余量不足时直接明确报错，避免表现成子包莫名其妙的编译失败
+            AVAIL=$(df -Pm / | awk 'NR==2{print $4}')
+            echo "Free disk before ${pkg}: ${AVAIL}MB"
+            if [ "${AVAIL:-0}" -lt 3000 ]; then
+              echo "::error::磁盘剩余仅 ${AVAIL}MB，疑似磁盘耗尽导致构建失败，终止"
+              exit 1
+            fi
+
+            # V=s：单次编译就把全部子构建输出留在日志里，失败后无需重试也能看到真因
+            if make "package/${DIR}/compile" -j$(nproc) V=s > "${LOG}" 2>&1; then
               SUCCESS_LIST="${SUCCESS_LIST} ${pkg}"
               echo "SUCCESS: $pkg"
+              rm -f "${LOG}"
               {
                 echo "SUCCESS_LIST=${SUCCESS_LIST}"
                 echo "FAILED_LIST=${FAILED_LIST}"
@@ -256,8 +318,14 @@ jobs:
             else
               FAILED_LIST="${FAILED_LIST} ${pkg}"
               echo "::error::Build failed for package: $pkg"
-              tail -100 "${LOG}" || true
-              # 先把结果落到 env/summary，再退出，保证汇总信息完整
+              # 先定位真正失败的子包（依赖失败时顶层只会打印一行 ERROR）
+              echo "----- failing sub-package / errors -----"
+              grep -nE "^ERROR: .* failed to build|^make.*Error [0-9]+|error:|No space left on device|No rule to make target" "${LOG}" \
+                | tail -20 || true
+              echo "----- last 150 lines of ${pkg} log -----"
+              tail -150 "${LOG}" || true
+              df -h / || true
+              # 先把结果落到 env，再退出，保证汇总信息完整
               {
                 echo "SUCCESS_LIST=${SUCCESS_LIST}"
                 echo "FAILED_LIST=${FAILED_LIST}"
