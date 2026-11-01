@@ -1,4 +1,4 @@
-name: Build Printing Packages (SDK)
+name: Build OpenWrt Printing Packages (SDK Tree)
 
 on:
   workflow_dispatch:
@@ -153,26 +153,36 @@ jobs:
       - name: Fix python setuptools host backend
         run: |
           cd openwrt
-          # 25.12 起 python 包走 PEP517：hostpkg 里的 python -m build --no-isolation
-          # 若 pyproject 的 backend 是 setuptools 而 hostpkg 没有 setuptools，就会报
-          #   Backend 'setuptools.build_meta' is not available
-          # （OpenWrt issue #29077 即此问题，官方只给 python-pip 单独补了 host 依赖）
-          # hplip 依赖 python3-distro，而 python-distro 正是 setuptools 后端，这里补上 host 依赖
-          MK="feeds/packages/lang/python/python-distro/Makefile"
-          if [ ! -f "${MK}" ]; then
-            echo "::notice::${MK} 不存在，跳过 setuptools 补丁"
-            exit 0
-          fi
-          if grep -q "python-setuptools/host" "${MK}"; then
-            echo "python-distro 已声明 python-setuptools/host，无需修改"
-            exit 0
-          fi
-          if grep -q "^HOST_BUILD_DEPENDS" "${MK}"; then
-            sed -i '0,/^HOST_BUILD_DEPENDS/s#^HOST_BUILD_DEPENDS *:*= *#&python-setuptools/host #' "${MK}"
-          else
-            sed -i '/^include \.\.\/python3-package\.mk/a HOST_BUILD_DEPENDS+=python-setuptools/host' "${MK}"
-          fi
-          grep -n "HOST_BUILD_DEPENDS" "${MK}" || true
+          # 25.12 起 python 包走 PEP517：用 hostpkg 的 python3.13 执行
+          #   python -m build --no-isolation
+          # 若 pyproject 的后端是 setuptools 而 hostpkg 里没有 setuptools，就会报
+          #   BackendUnavailable: Cannot import 'setuptools.build_meta'
+          # （openwrt/packages#29077；官方给 python-pip 的修法就是 PKG_BUILD_DEPENDS）
+          #
+          # ⚠ 关键：目标包必须写 PKG_BUILD_DEPENDS，不能写 HOST_BUILD_DEPENDS。
+          # include/package-dumpinfo.mk 会把 HOST_BUILD_DEPENDS 写成 "Build-Depends/host"，
+          # 而 scripts/package-metadata.pl 只把这条加到该源码包的 /host 编译目标上，
+          # 对目标包自己的 compile 目标完全无效 —— 上一版用错变量，所以静默失效（什么都没编）。
+          for MK in \
+            feeds/packages/lang/python/python-distro/Makefile
+          do
+            if [ ! -f "${MK}" ]; then
+              echo "::notice::${MK} 不存在，跳过"
+              continue
+            fi
+            if grep -q "python-setuptools/host" "${MK}"; then
+              echo "${MK} 已声明 python-setuptools/host，无需修改"
+              continue
+            fi
+            # 插到 include ../pypi.mk 之前，位置与官方 python-pip 一致
+            if grep -q "^include \.\./pypi\.mk" "${MK}"; then
+              sed -i 's#^include \.\./pypi\.mk#PKG_BUILD_DEPENDS+=python-setuptools/host\ninclude ../pypi.mk#' "${MK}"
+            else
+              printf 'PKG_BUILD_DEPENDS+=python-setuptools/host\n' >> "${MK}"
+            fi
+            echo "--- ${MK} ---"
+            grep -n "PKG_BUILD_DEPENDS" "${MK}"
+          done
 
       - name: Configure Target and Packages
         run: |
@@ -272,6 +282,24 @@ jobs:
             exit 1
           fi
 
+      # 兜底修复：不依赖单个包的元数据怎么写，直接把 setuptools 装进 staging_dir/hostpkg。
+      # 这样 hplip 依赖链里任何 PEP517 + setuptools 后端的 python 包（python-distro 等）
+      # 都能 import 到后端，不会再出现 "Backend 'setuptools.build_meta' is not available"。
+      - name: Prebuild Host Setuptools Backend
+        run: |
+          cd openwrt
+          if [ ! -d package/feeds/packages/python-setuptools ]; then
+            echo "::warning::package/feeds/packages/python-setuptools 不存在，跳过 host setuptools 预构建"
+            exit 0
+          fi
+          if ! make package/feeds/packages/python-setuptools/host/compile -j$(nproc); then
+            echo "::warning::host setuptools 预构建失败；若后续 python 包仍报 BackendUnavailable，请回看本步骤日志"
+            exit 0
+          fi
+          HOSTPY=./staging_dir/hostpkg/bin/python3
+          [ -x "${HOSTPY}" ] || HOSTPY=./staging_dir/hostpkg/bin/python3.13
+          "${HOSTPY}" -c "import setuptools, setuptools.build_meta; print('hostpkg setuptools =', setuptools.__version__)"
+
       - name: Build Packages
         run: |
           cd openwrt
@@ -322,6 +350,18 @@ jobs:
               echo "----- failing sub-package / errors -----"
               grep -nE "^ERROR: .* failed to build|^make.*Error [0-9]+|error:|No space left on device|No rule to make target" "${LOG}" \
                 | tail -20 || true
+
+              # 把真因以 annotation 形式暴露在运行页（无需下载日志也能看到）
+              SUBFAIL=$(grep -oE "ERROR: [^ ]+ failed to build" "${LOG}" | head -1)
+              if [ -n "${SUBFAIL}" ]; then
+                echo "::error title=Failed sub-package::${SUBFAIL}"
+              fi
+              REASON=$(grep -iE "error:|Backend .* is not available|No such file or directory|undefined reference|fatal error" "${LOG}" \
+                | tail -1 | tr -d '\r' | cut -c1-300)
+              if [ -n "${REASON}" ]; then
+                echo "::error title=Root cause hint::${REASON}"
+              fi
+
               echo "----- last 150 lines of ${pkg} log -----"
               tail -150 "${LOG}" || true
               df -h / || true
